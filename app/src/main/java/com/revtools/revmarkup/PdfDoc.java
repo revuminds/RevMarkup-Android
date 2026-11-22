@@ -30,7 +30,7 @@ final class PdfDoc {
 
     static PdfDoc open(File f) throws Exception {
         long h = Pdfium.nOpen(f.getAbsolutePath(), null);
-        if (h <= 0) throw new Exception(Pdfium.errorText(h));
+        if (h == 0) throw new Exception(Pdfium.errorText(Pdfium.nLastError()));
         try {
             int n = Pdfium.nPageSizes(h).length / 2;
             // 1. old summary pages (desktop adds them at the end) are removed; they are made again on save

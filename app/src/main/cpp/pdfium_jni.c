@@ -34,12 +34,14 @@ JNIEXPORT jlong JNICALL FN(nOpen)(JNIEnv *e, jclass c, jstring path, jstring pw)
     FPDF_DOCUMENT d = FPDF_LoadDocument(p, w);
     (*e)->ReleaseStringUTFChars(e, path, p);
     if (w) (*e)->ReleaseStringUTFChars(e, pw, w);
-    if (!d) return -(jlong)FPDF_GetLastError();
-    return (jlong)(intptr_t)d;
+    // Android tags heap pointers in the top byte, so a valid handle can be "negative": 0 = failed.
+    return d ? (jlong)(intptr_t)d : 0;
 }
 
+JNIEXPORT jint JNICALL FN(nLastError)(JNIEnv *e, jclass c) { return (jint)FPDF_GetLastError(); }
+
 JNIEXPORT void JNICALL FN(nClose)(JNIEnv *e, jclass c, jlong d) {
-    if (d > 0) FPDF_CloseDocument((FPDF_DOCUMENT)(intptr_t)d);
+    if (d != 0) FPDF_CloseDocument((FPDF_DOCUMENT)(intptr_t)d);
 }
 
 // [w0,h0,w1,h1,...] display size of every page in points (rotation applied)

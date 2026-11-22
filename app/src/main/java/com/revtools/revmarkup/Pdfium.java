@@ -19,7 +19,8 @@ final class Pdfium {
 
     static native void nInit();
     static native void nCancel();
-    static native long nOpen(String path, String password);   // <= 0: -(error code)
+    static native long nOpen(String path, String password);   // 0 = failed (see nLastError); valid handles may be negative
+    static native int nLastError();
     static native void nClose(long doc);
     static native float[] nPageSizes(long doc);
     static native double[] nPageMap(long doc, int page);
@@ -35,13 +36,13 @@ final class Pdfium {
                                    int textColor, String[] kv);
     static native int nSave(long doc, String path);
 
-    static String errorText(long code) {
-        switch ((int) -code) {
+    static String errorText(int code) {
+        switch (code) {
             case 2: return "File not found or could not be opened.";
             case 3: return "This is not a valid PDF (or it is damaged).";
             case 4: return "This PDF is password protected.";
             case 5: return "This PDF's security settings are not supported.";
-            default: return "Could not open the PDF (error " + (-code) + ").";
+            default: return "Could not open the PDF (error " + code + ").";
         }
     }
 }
