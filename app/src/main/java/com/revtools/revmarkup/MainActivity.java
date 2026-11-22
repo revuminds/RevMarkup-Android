@@ -1045,7 +1045,8 @@ public final class MainActivity extends Activity implements PageView.Listener {
 
     private void moreMenu(View a) {
         PopupMenu m = new PopupMenu(this, a);
-        m.getMenu().add(0, 1, 0, "Save as…");
+        m.getMenu().add(0, 1, 0, "Save a copy…");
+        if (doc != null && srcUri != null && backupOf(srcUri).exists()) m.getMenu().add(0, 5, 0, "Restore original drawing…");
         m.getMenu().add(0, 2, 0, "Go to sheet…");
         m.getMenu().add(0, 3, 0, "Fit sheet");
         m.getMenu().add(0, 4, 0, "Settings…");
@@ -1054,6 +1055,7 @@ public final class MainActivity extends Activity implements PageView.Listener {
                 case 1: save(true); break;
                 case 2: askPage(); break;
                 case 3: view.fit(); break;
+                case 5: restoreOriginal(); break;
                 default: settings();
             }
             return true;
@@ -1433,7 +1435,7 @@ public final class MainActivity extends Activity implements PageView.Listener {
             where = whereLabel == null ? "" : whereLabel;
             draftAt = 0; savedAt = 0;
             // a comments file saves back onto itself (when we may write it)
-            outUri = name.toLowerCase(Locale.ROOT).endsWith("_comments.pdf") && (fromPicker || tree != null) ? u : null;
+            outUri = u;   // Save writes into the same file (falls back to "save a copy" when it is view-only)
             Recents.Item r = recents.touch(u.toString());
             r.name = name; r.tree = tree == null ? "" : tree.toString(); r.folder = folder == null ? "" : folder; r.where = where;
             if (size[0] < 0) size[0] = work.length();
@@ -1519,8 +1521,62 @@ public final class MainActivity extends Activity implements PageView.Listener {
         return base.toLowerCase(Locale.ROOT).endsWith("_comments") ? base + ".pdf" : base + "_comments.pdf";
     }
 
+    /** Untouched copy of a drawing, kept in the app before RevMarkup first writes into it. */
+    private File backupOf(Uri u) {
+        File dir = new File(getFilesDir(), "originals");
+        //noinspection ResultOfMethodCallIgnored
+        dir.mkdirs();
+        return new File(dir, Integer.toHexString(u.toString().hashCode()) + ".pdf");
+    }
+
+    private void keepOriginal(File from, File to) throws Exception {
+        if (to.exists()) return;
+        File dir = to.getParentFile();
+        File[] old = dir.listFiles();
+        if (old != null && old.length >= 30) {   // keep the 30 newest
+            java.util.Arrays.sort(old, (x, y) -> Long.compare(x.lastModified(), y.lastModified()));
+            for (int i = 0; i <= old.length - 30; i++) //noinspection ResultOfMethodCallIgnored
+                old[i].delete();
+        }
+        File tmp = new File(to.getPath() + ".tmp");
+        try (InputStream in = new FileInputStream(from); OutputStream o = new FileOutputStream(tmp)) {
+            byte[] buf = new byte[1 << 16];
+            for (int r; (r = in.read(buf)) > 0; ) o.write(buf, 0, r);
+        }
+        if (!tmp.renameTo(to)) throw new Exception("Could not keep a copy of the original.");
+    }
+
+    private void restoreOriginal() {
+        final Uri u = srcUri; final File b = backupOf(u);
+        if (!b.exists()) return;
+        new AlertDialog.Builder(this).setTitle("Restore original drawing?")
+                .setMessage("“" + srcName + "” goes back to how it was before RevMarkup first saved into it. "
+                        + "All markups in it are removed. This can't be undone.")
+                .setPositiveButton("Restore", (d, w) -> {
+                    final ContentResolver cr = getContentResolver();
+                    worker.job(() -> {
+                        OutputStream o;
+                        try { o = cr.openOutputStream(u, "wt"); } catch (Exception e) { o = cr.openOutputStream(u, "w"); }
+                        if (o == null) throw new Exception("No permission to write there.");
+                        try (OutputStream os = o; InputStream in = new FileInputStream(b)) {
+                            byte[] buf = new byte[1 << 16];
+                            for (int r; (r = in.read(buf)) > 0; ) os.write(buf, 0, r);
+                        }
+                    }, err -> {
+                        if (err != null) { toast("Restore failed: " + err.getMessage()); return; }
+                        view.dirty = false;
+                        //noinspection ResultOfMethodCallIgnored
+                        b.delete();
+                        toast("Original restored.");
+                        open(u, treeUri, folderId, false, where);
+                    });
+                })
+                .setNegativeButton("Cancel", null).show();
+    }
+
     private void doSave(Uri target, boolean chosen) {
         final List<Mk> snap = new ArrayList<>(view.marks);
+        final File orig = work; final File keep = target.equals(srcUri) ? backupOf(target) : null;
         final String author = prefs.getString("author", "RevMarkup");
         final PdfDoc d = doc;
         final ContentResolver cr = getContentResolver();
@@ -1528,6 +1584,7 @@ public final class MainActivity extends Activity implements PageView.Listener {
         chipT.setText("Saving…");
         worker.job(() -> {
             d.save(snap, author, tmp);
+            if (keep != null) keepOriginal(orig, keep);
             OutputStream o;
             try { o = cr.openOutputStream(target, "wt"); } catch (Exception e) { o = cr.openOutputStream(target, "w"); }
             if (o == null) throw new Exception("No permission to write there.");
@@ -1542,7 +1599,7 @@ public final class MainActivity extends Activity implements PageView.Listener {
                 refreshBar();
                 if (!chosen) {   // the earlier location can no longer be written: ask for a place
                     outUri = null;
-                    toast("Could not write to the earlier file - choose where to save.");
+                    toast("This file can't be changed (view only?) - choose where to save a copy.");
                     save(true, pendingAfterSave);
                 } else {
                     pendingAfterSave = null;
