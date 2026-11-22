@@ -133,7 +133,7 @@ final class Tools {
 
     /** Width range of the slider in paper mm. */
     static float minMm(int t) { return t == HL ? 1f : 0.1f; }
-    static float maxMm(int t) { return t == HL ? 20f : 3f; }
+    static float maxMm(int t) { return t == HL ? 20f : 10f; }
     static boolean hasWidth(int t) { return t != ERASER && t != TEXT && t != NOTE && t != LASSO; }
 
     private static void clampWidth(int t, S st) {
@@ -150,6 +150,12 @@ final class Tools {
         double f = p / 1000.0;
         float mm = (float) (minMm(t) + (maxMm(t) - minMm(t)) * f * f);
         return mm < 1 ? Math.round(mm * 100) / 100f : Math.round(mm * 20) / 20f;
+    }
+
+    /** Nearest Fine / Medium / Thick index (kept in the file for the desktop app). */
+    static int sizeIndex(int t, float mm) {
+        if (t == HL) return mm < 4 ? 0 : mm < 6.5f ? 1 : 2;
+        return mm < 0.22f ? 0 : mm < 0.4f ? 1 : 2;
     }
 
     static String mmText(float mm) { return String.format(Locale.US, mm < 1 ? "%.2f mm" : "%.1f mm", mm); }

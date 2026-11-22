@@ -356,6 +356,16 @@ public final class MainActivity extends Activity implements PageView.Listener {
         fit.setPadding(px(12), 0, px(12), 0);
         fit.setOnClickListener(v -> view.fit());
         pg.addView(fit, U.lp(ViewGroup.LayoutParams.WRAP_CONTENT, px(40)));
+        View d2 = new View(this);
+        d2.setBackgroundColor(0xFF3A3D44);
+        pg.addView(d2, U.lp(px(1), px(24), px(4), 0, px(4), 0));
+        TextView close = U.text(this, "Close", 13, Color.WHITE, true);
+        close.setGravity(Gravity.CENTER);
+        close.setPadding(px(14), 0, px(14), 0);
+        close.setBackground(U.round(U.ACCENT, 10));
+        close.setContentDescription("Close the drawing and go to the home screen");
+        close.setOnClickListener(v -> closeFile());
+        pg.addView(close, U.lp(ViewGroup.LayoutParams.WRAP_CONTENT, px(36), 0, 0, px(2), 0));
         FrameLayout.LayoutParams q = new FrameLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, px(44), Gravity.BOTTOM | Gravity.END);
         q.setMargins(0, 0, px(16), px(12));
         editor.addView(pg, q);
@@ -429,6 +439,17 @@ public final class MainActivity extends Activity implements PageView.Listener {
         home.setVisibility(View.VISIBLE);
         applyBars();
         home.refresh();
+    }
+
+    /** Close button: unsaved markups -> Save / Keep as draft / Cancel, then home. */
+    private void closeFile() {
+        view.finishPoly();
+        if (doc == null || !view.dirty) { goHome(); return; }
+        new AlertDialog.Builder(this).setTitle("Save your markups?")
+                .setMessage("“" + srcName + "” has changes that are not saved in the file yet.")
+                .setPositiveButton("Save and close", (d, w) -> save(false, this::goHome))
+                .setNegativeButton("Close, keep as draft", (d, w) -> goHome())
+                .setNeutralButton("Cancel", null).show();
     }
 
     @Override public void onBackPressed() {
@@ -526,91 +547,72 @@ public final class MainActivity extends Activity implements PageView.Listener {
     }
 
     private void addSizes(int t, Tools.S s) {
+        if (Tools.hasWidth(t)) { addWidthSlider(t, s); return; }
         String[] names = {"Fine", "Medium", "Thick"};
-        boolean mm = Tools.hasWidth(t);
         for (int i = 0; i < 3; i++) {
             final int k = i;
             U.Swatch w = swatch(U.Swatch.SIZE);
             w.dot = Tools.sizeDot(t, i);
-            w.on = s.size == i && (!mm || Math.abs(s.width - s.mm[i]) < 0.001f);
-            w.color = t == Tools.HL ? U.parse(s.color(), 0) : 0;
-            w.setContentDescription(mm ? names[i] + " " + Tools.mmText(s.mm[i]) + " (long-press to store the current width)" : names[i]);
-            w.setOnClickListener(v -> { s.size = k; if (mm) s.width = s.mm[k]; toolChanged(); });
-            if (mm) w.setOnLongClickListener(v -> {
-                s.mm[k] = s.width; s.size = k;
-                toast(names[k] + " is now " + Tools.mmText(s.width));
-                toolChanged();
-                return true;
-            });
+            w.on = s.size == i;
+            w.setContentDescription(names[i]);
+            w.setOnClickListener(v -> { s.size = k; toolChanged(); });
         }
         String lab = Tools.sizeLabel(t, s, unit());
-        if (lab.isEmpty()) return;
-        TextView l = U.text(this, lab, 13, mm ? U.INK : U.MUTED, mm);
-        l.setGravity(Gravity.CENTER);
-        l.setPadding(px(10), 0, px(10), 0);
-        if (mm) {
-            l.setBackground(U.round(U.ACTIVE, 12));
-            l.setContentDescription("Line width " + lab + " - tap for the slider");
-            l.setOnClickListener(v -> widthPopover(l, t, s));
-            row2.addView(l, U.lp(ViewGroup.LayoutParams.WRAP_CONTENT, px(38), px(4), 0, px(2), 0));
-        } else row2.addView(l);
+        if (!lab.isEmpty()) {
+            TextView l = U.text(this, lab, 12, U.MUTED, false);
+            l.setPadding(px(4), 0, px(2), 0);
+            row2.addView(l);
+        }
     }
 
-    /** Exact width: slider (squared scale = fine steps at the thin end) and -/+ steps. */
-    private void widthPopover(View anchorV, int t, Tools.S s) {
-        LinearLayout c = new LinearLayout(this);
-        c.setOrientation(LinearLayout.VERTICAL);
-        c.setPadding(px(16), px(14), px(16), px(12));
-        U.card(c, 16, 8);
-        LinearLayout head = new LinearLayout(this);
-        head.setGravity(Gravity.CENTER_VERTICAL);
-        head.addView(U.text(this, "Line width on paper", 14, U.INK, true), new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
-        TextView val = U.text(this, Tools.mmText(s.width), 14, U.BLUE, true);
-        head.addView(val);
-        c.addView(head);
-        LinearLayout row = new LinearLayout(this);
-        row.setGravity(Gravity.CENTER_VERTICAL);
-        TextView minus = U.text(this, "−", 20, U.INK, true), plus = U.text(this, "+", 20, U.INK, true);
+    interface Width { void set(float mm, boolean done); }
+
+    /** Line width slider in row 2: −  ───●───  +  0.25 mm (squared scale = fine steps at the thin end). */
+    private void slider(int t, float start, Width cb) {
+        final float[] cur = {start};
+        TextView minus = U.text(this, "−", 18, U.INK, true), plus = U.text(this, "+", 18, U.INK, true);
         for (TextView b : new TextView[]{minus, plus}) { b.setGravity(Gravity.CENTER); b.setBackground(U.round(U.ACTIVE, 10)); }
+        TextView val = U.text(this, Tools.mmText(start), 13, U.INK, true);
+        val.setGravity(Gravity.CENTER);
         SeekBar sb = new SeekBar(this);
         sb.setMax(1000);
-        sb.setProgress(Tools.toSlider(t, s.width));
-        row.addView(minus, U.lp(px(40), px(40)));
-        row.addView(sb, new LinearLayout.LayoutParams(0, px(44), 1));
-        row.addView(plus, U.lp(px(40), px(40)));
-        c.addView(row, U.lp(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT, 0, px(8), 0, 0));
-        final Runnable[] apply = new Runnable[1];
-        apply[0] = () -> {
-            val.setText(Tools.mmText(s.width));
-            tools.save(tools.current);
-            tools.apply(view);
-            view.invalidate();
-        };
+        sb.setProgress(Tools.toSlider(t, start));
+        sb.setContentDescription("Line width");
         sb.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
-            @Override public void onProgressChanged(SeekBar b, int p, boolean user) { if (user) { s.width = Tools.fromSlider(t, p); apply[0].run(); } }
+            @Override public void onProgressChanged(SeekBar b, int p, boolean user) {
+                if (!user) return;
+                cur[0] = Tools.fromSlider(t, p);
+                val.setText(Tools.mmText(cur[0]));
+                cb.set(cur[0], false);
+            }
             @Override public void onStartTrackingTouch(SeekBar b) { }
-            @Override public void onStopTrackingTouch(SeekBar b) { }
+            @Override public void onStopTrackingTouch(SeekBar b) { cb.set(cur[0], true); }
         });
         View.OnClickListener step = v -> {
-            float d = s.width < 0.5f ? 0.01f : s.width < 1f ? 0.05f : s.width < 5f ? 0.1f : 0.5f;
-            float nw = s.width + (v == plus ? d : -d);
-            nw = Math.max(Tools.minMm(t), Math.min(Tools.maxMm(t), Math.round(nw / d) * d));
-            s.width = Math.round(nw * 100) / 100f;
-            sb.setProgress(Tools.toSlider(t, s.width));
-            apply[0].run();
+            float w = cur[0];
+            float d = w < 0.5f ? 0.01f : w < 1f ? 0.05f : w < 5f ? 0.1f : 0.5f;
+            float nw = Math.max(Tools.minMm(t), Math.min(Tools.maxMm(t), Math.round((w + (v == plus ? d : -d)) / d) * d));
+            cur[0] = Math.round(nw * 100) / 100f;
+            sb.setProgress(Tools.toSlider(t, cur[0]));
+            val.setText(Tools.mmText(cur[0]));
+            cb.set(cur[0], true);
         };
         minus.setOnClickListener(step);
         plus.setOnClickListener(step);
-        TextView hint = U.text(this, "Long-press Fine / Medium / Thick to keep this width as that preset.", 12, U.MUTED, false);
-        hint.setSingleLine(false);
-        hint.setPadding(0, px(6), 0, 0);
-        c.addView(hint);
-        PopupWindow w = new PopupWindow(c, px(320), ViewGroup.LayoutParams.WRAP_CONTENT, true);
-        w.setBackgroundDrawable(new ColorDrawable(Color.TRANSPARENT));
-        w.setOutsideTouchable(true);
-        w.setElevation(px(8));
-        w.setOnDismissListener(this::buildRow2);
-        w.showAsDropDown(anchorV, 0, px(14));
+        row2.addView(minus, U.lp(px(34), px(34), px(2), 0, 0, 0));
+        row2.addView(sb, U.lp(px(220), px(40)));
+        row2.addView(plus, U.lp(px(34), px(34)));
+        row2.addView(val, U.lp(px(68), px(40)));
+    }
+
+    private void addWidthSlider(int t, Tools.S s) {
+        slider(t, s.width, (mm, done) -> {
+            s.width = mm;
+            s.size = Tools.sizeIndex(t, mm);
+            tools.apply(view);
+            view.invalidate();
+            if (done) tools.save(tools.current);
+        });
     }
 
     /** Highlighter opacity, inline in row 2. */
@@ -707,11 +709,15 @@ public final class MainActivity extends Activity implements PageView.Listener {
         U.Swatch plus = swatch(U.Swatch.PLUS);
         plus.setOnClickListener(v -> palette("Colour", c -> styleSel(c, -1)));
         sep();
-        int t = sel.k == Mk.HIGHLIGHT ? Tools.HL : sel.k == Mk.TEXT ? Tools.TEXT : Tools.PEN;
-        for (int i = 0; i < 3; i++) {
+        int t = toolOf(sel);
+        if (sel.k != Mk.TEXT) {
+            slider(t, (float) Math.max(Tools.minMm(t), Math.min(Tools.maxMm(t), Mk.ptToMm(sel.w))), (mm, done) -> {
+                if (done) styleSelWidth(t, mm);
+            });
+        } else for (int i = 0; i < 3; i++) {
             final int k = i;
             U.Swatch w = swatch(U.Swatch.SIZE);
-            w.dot = Tools.sizeDot(t, i);
+            w.dot = Tools.sizeDot(Tools.TEXT, i);
             w.on = sel.size == i;
             w.setOnClickListener(v -> styleSel(null, k));
         }
@@ -737,6 +743,18 @@ public final class MainActivity extends Activity implements PageView.Listener {
             view.widthMm = (float) Mk.ptToMm(sel.w);
             view.sizeIdx = sel.size;
         }
+        view.styleSelected();
+        view.color = c0; view.sizeIdx = s0; view.widthMm = w0;
+        buildRow2();
+    }
+
+    private void styleSelWidth(int t, float mm) {
+        Mk sel = view.sel;
+        if (sel == null) return;
+        String c0 = view.color; int s0 = view.sizeIdx; float w0 = view.widthMm;
+        view.color = sel.color;
+        view.sizeIdx = Tools.sizeIndex(t, mm);
+        view.widthMm = mm;
         view.styleSelected();
         view.color = c0; view.sizeIdx = s0; view.widthMm = w0;
         buildRow2();
