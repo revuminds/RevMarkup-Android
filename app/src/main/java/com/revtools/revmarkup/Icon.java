@@ -14,7 +14,7 @@ final class Icon extends View {
             PREV = 27, NEXT = 28;
 
     final int id;
-    boolean active;
+    boolean active, more;   // more: has variants (small corner mark)
     int color = 0xFFE8EAED, activeBg = 0xFF3C4450, activeColor = 0xFFFFFFFF;
     private final Paint p = new Paint(Paint.ANTI_ALIAS_FLAG), bg = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Path path = new Path();
@@ -48,6 +48,13 @@ final class Icon extends View {
         p.setStyle(Paint.Style.STROKE);
         glyph(c);
         c.restore();
+        if (more) {   // small triangle bottom-right: tap again / long-press for variants
+            bg.setColor(col);
+            android.graphics.Path t = new android.graphics.Path();
+            float x = w / 2 + s * 0.34f, y = h / 2 + s * 0.34f, k = s * 0.1f;
+            t.moveTo(x, y); t.lineTo(x - k, y); t.lineTo(x, y - k); t.close();
+            c.drawPath(t, bg);
+        }
     }
 
     private void line(Canvas c, float... xy) {

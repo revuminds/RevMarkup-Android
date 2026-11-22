@@ -19,7 +19,11 @@ import java.util.Locale;
 final class Mk {
     // Kind numbers = desktop enum order. Do not change.
     static final int PEN = 0, HIGHLIGHT = 1, TEXT = 2, ARROW = 3, BOX = 4, CLOUD = 5, PIN = 6, ELLIPSE = 7;
-    static final int NOBOX = 2;
+    static final int STRAIGHT = 1, NOBOX = 2;
+    // tablet variants (Flags bits; desktop must learn these - see handover)
+    static final int POLY = 4;      // cloud: freehand outline in P (closed)
+    static final int OVAL = 8;      // cloud: elliptical, P0/P1 = bounding box
+    static final int ROUND = 16;    // box: rounded corners, radius = min(w,h) * 0.12
 
     int k;
     int page;
@@ -71,9 +75,10 @@ final class Mk {
     /** Markups this app can draw and edit itself. Others stay inside the PDF untouched. */
     boolean editableHere() {
         switch (k) {
-            case PEN: case HIGHLIGHT: case CLOUD: return n() >= 1;
+            case PEN: case HIGHLIGHT: return n() >= 1;
+            case CLOUD: return n() >= 2;
             case BOX: case ELLIPSE: return n() >= 2 && fill.isEmpty();
-            case ARROW: return n() == 2;
+            case ARROW: return n() >= 2;
             case TEXT: return n() == 1 && textW == 0;
             default: return false;
         }
@@ -172,21 +177,17 @@ final class Mk {
                 break;
             case BOX: {
                 float x0 = Math.min(x(0), x(1)), x1 = Math.max(x(0), x(1)), y0 = Math.min(y(0), y(1)), y1 = Math.max(y(0), y(1));
-                out.add(new Sub(new float[]{x0, y0, x1, y0, x1, y1, x0, y1}, true, false));
+                if ((flags & ROUND) != 0) out.add(new Sub(rounded(x0, y0, x1, y1), true, false));
+                else out.add(new Sub(new float[]{x0, y0, x1, y0, x1, y1, x0, y1}, true, false));
                 break;
             }
-            case ELLIPSE: {
-                float cx = (x(0) + x(1)) / 2, cy = (y(0) + y(1)) / 2, rx = Math.abs(x(1) - x(0)) / 2, ry = Math.abs(y(1) - y(0)) / 2;
-                int n = 72;
-                float[] e = new float[2 * n];
-                for (int i = 0; i < n; i++) {
-                    double a = 2 * Math.PI * i / n;
-                    e[2 * i] = (float) (cx + rx * Math.cos(a)); e[2 * i + 1] = (float) (cy + ry * Math.sin(a));
-                }
-                out.add(new Sub(e, true, false));
+            case ELLIPSE: out.add(new Sub(oval(x(0), y(0), x(1), y(1), 72), true, false)); break;
+            case CLOUD:
+                if ((flags & POLY) != 0 && n() >= 3) out.add(cloudAlong(p));
+                else if ((flags & POLY) != 0) out.add(new Sub(p.clone(), false, false));
+                else if ((flags & OVAL) != 0) out.add(cloudAlong(oval(x(0), y(0), x(1), y(1), 180)));
+                else out.add(cloud());
                 break;
-            }
-            case CLOUD: out.add(cloud()); break;
             case ARROW: arrow(out); break;
             default: break;
         }
@@ -211,6 +212,63 @@ final class Mk {
             }
         }
         return new Sub(out.toArray(), true, false);
+    }
+
+    /** Cloud along any closed outline: equal arcs of about `bump`, bulging outwards. */
+    private Sub cloudAlong(float[] poly) {
+        int m = poly.length / 2;
+        double area = 0;
+        for (int i = 0; i < m; i++) { int j = (i + 1) % m; area += poly[2 * i] * poly[2 * j + 1] - poly[2 * j] * poly[2 * i + 1]; }
+        float[] q = poly;
+        if (area < 0) {   // make it clockwise on screen so the arcs bulge outwards
+            q = new float[poly.length];
+            for (int i = 0; i < m; i++) { q[2 * i] = poly[2 * (m - 1 - i)]; q[2 * i + 1] = poly[2 * (m - 1 - i) + 1]; }
+        }
+        double L = 0;
+        for (int i = 0; i < m; i++) { int j = (i + 1) % m; L += Math.hypot(q[2 * j] - q[2 * i], q[2 * j + 1] - q[2 * i + 1]); }
+        int n = (int) Math.max(3, Math.min(4000, Math.round(L / Math.max(bump, 1e-6))));
+        double step = L / n;
+        float[] s = new float[2 * n];
+        int seg = 0; double segStart = 0, want = 0;
+        for (int k = 0; k < n; k++, want += step) {
+            while (true) {
+                int j = (seg + 1) % m;
+                double len = Math.hypot(q[2 * j] - q[2 * seg], q[2 * j + 1] - q[2 * seg + 1]);
+                if (want <= segStart + len || seg == m - 1) {
+                    double t = len < 1e-9 ? 0 : Math.min(1, (want - segStart) / len);
+                    s[2 * k] = (float) (q[2 * seg] + (q[2 * j] - q[2 * seg]) * t);
+                    s[2 * k + 1] = (float) (q[2 * seg + 1] + (q[2 * j + 1] - q[2 * seg + 1]) * t);
+                    break;
+                }
+                segStart += len; seg++;
+            }
+        }
+        FloatList out = new FloatList();
+        out.add(s[0], s[1]);
+        for (int k = 0; k < n; k++) { int j = (k + 1) % n; arcOut(out, s[2 * k], s[2 * k + 1], s[2 * j], s[2 * j + 1]); }
+        return new Sub(out.toArray(), true, false);
+    }
+
+    static float[] oval(float ax, float ay, float bx, float by, int n) {
+        float cx = (ax + bx) / 2, cy = (ay + by) / 2, rx = Math.abs(bx - ax) / 2, ry = Math.abs(by - ay) / 2;
+        float[] e = new float[2 * n];
+        for (int i = 0; i < n; i++) {
+            double a = 2 * Math.PI * i / n;
+            e[2 * i] = (float) (cx + rx * Math.cos(a)); e[2 * i + 1] = (float) (cy + ry * Math.sin(a));
+        }
+        return e;
+    }
+
+    static float[] rounded(float x0, float y0, float x1, float y1) {
+        float r = Math.min(x1 - x0, y1 - y0) * 0.12f;
+        float[][] c = {{x1 - r, y0 + r, 270}, {x1 - r, y1 - r, 0}, {x0 + r, y1 - r, 90}, {x0 + r, y0 + r, 180}};
+        FloatList out = new FloatList();
+        for (float[] k : c)
+            for (int i = 0; i <= 8; i++) {
+                double a = Math.toRadians(k[2] + 90.0 * i / 8);
+                out.add((float) (k[0] + r * Math.cos(a)), (float) (k[1] + r * Math.sin(a)));
+            }
+        return out.toArray();
     }
 
     /** Arc from a to b, radius = chord*0.55, bulging outwards (left of travel on screen), like the desktop. */
@@ -242,6 +300,7 @@ final class Mk {
     }
 
     private void arrow(List<Sub> out) {
+        if (n() > 2) { polyArrow(out); return; }
         float ax = x(0), ay = y(0), bx = x(1), by = y(1);
         double L = Math.max(Math.hypot(bx - ax, by - ay), 1e-6), ux = (bx - ax) / L, uy = (by - ay) / L;
         double hl = Math.min(w * 5.0, L * (heads == 2 ? 0.4 : 0.6)), hw = hl * 0.55;
@@ -250,6 +309,21 @@ final class Mk {
         out.add(new Sub(new float[]{(float) sx, (float) sy, (float) ex, (float) ey}, false, false));
         if (heads >= 1) out.add(head(bx, by, ux, uy, hl, hw));
         if (heads == 2) out.add(head(ax, ay, -ux, -uy, hl, hw));
+    }
+
+    /** Line / arrow with corners: heads on the first / last segment (same rule as the desktop). */
+    private void polyArrow(List<Sub> out) {
+        int n = n();
+        float ax = x(0), ay = y(0), bx = x(n - 1), by = y(n - 1);
+        double le = Math.max(Math.hypot(bx - x(n - 2), by - y(n - 2)), 1e-6), uex = (bx - x(n - 2)) / le, uey = (by - y(n - 2)) / le;
+        double ls = Math.max(Math.hypot(x(1) - ax, y(1) - ay), 1e-6), usx = (x(1) - ax) / ls, usy = (y(1) - ay) / ls;
+        double hlE = Math.min(w * 5.0, le * 0.6), hlS = Math.min(w * 5.0, ls * 0.6);
+        float[] line = p.clone();
+        if (heads == 2) { line[0] = (float) (ax + usx * hlS); line[1] = (float) (ay + usy * hlS); }
+        if (heads >= 1) { line[2 * n - 2] = (float) (bx - uex * hlE); line[2 * n - 1] = (float) (by - uey * hlE); }
+        out.add(new Sub(line, false, false));
+        if (heads >= 1) out.add(head(bx, by, uex, uey, hlE, hlE * 0.55));
+        if (heads == 2) out.add(head(ax, ay, -usx, -usy, hlS, hlS * 0.55));
     }
 
     private static Sub head(double tx, double ty, double ux, double uy, double hl, double hw) {

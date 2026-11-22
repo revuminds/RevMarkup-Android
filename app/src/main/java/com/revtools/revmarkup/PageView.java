@@ -30,6 +30,7 @@ final class PageView extends View {
         void onPageChanged();
         void onSelectionChanged();
         void onTextRequest(float x, float y, Mk edit);   // x,y in sheet points (edit == null: new text)
+        void onQuickMenu(float screenX, float screenY, float x, float y);
     }
 
     private final PdfWorker worker;
@@ -99,8 +100,14 @@ final class PageView extends View {
         scaler.setQuickScaleEnabled(false);
         gestures = new GestureDetector(c, new GestureDetector.SimpleOnGestureListener() {
             @Override public boolean onDoubleTap(MotionEvent e) {
-                if (scale > fitScale * 1.2f) fit(); else zoomAt(e.getX(), e.getY(), 2.5f);
+                fit();   // double-tap = whole sheet
                 return true;
+            }
+            @Override public void onLongPress(MotionEvent e) {
+                if (mode != PAN || panMoved || scaled || e.getPointerCount() > 1 || listener == null) return;
+                mode = HAND;   // the rest of this touch is ignored
+                performHapticFeedback(android.view.HapticFeedbackConstants.LONG_PRESS);
+                listener.onQuickMenu(e.getX(), e.getY(), px(e.getX()), py(e.getY()));
             }
             @Override public boolean onFling(MotionEvent a, MotionEvent b, float vx, float vy) {
                 if (doc == null || scaled || scale > fitScale * 1.03f) return false;
@@ -123,6 +130,7 @@ final class PageView extends View {
         synchronized (cache) { cache.clear(); cacheScale.clear(); }
         tilePage = -1;
         doc = d;
+        poly = null;
         marks = new ArrayList<>(loaded);
         undo.clear(); redo.clear();
         pathCache.clear();
@@ -137,6 +145,7 @@ final class PageView extends View {
 
     void showPage(int p) {
         if (doc == null || p < 0 || p >= doc.pages() || p == page) return;
+        finishPoly();
         page = p;
         setSel(null);
         needFit = true;
@@ -248,7 +257,8 @@ final class PageView extends View {
     }
 
     private void zoomAt(float fx, float fy, float f) {
-        float ns = Math.max(fitScale * 0.5f, Math.min(fitScale * 40, scale * f));
+        // practically unlimited (PDFium still renders sharp at 200x a full-screen sheet)
+        float ns = Math.max(fitScale * 0.02f, Math.min(fitScale * 200, scale * f));
         f = ns / scale;
         tx = fx - (fx - tx) * f;
         ty = fy - (fy - ty) * f;
@@ -258,12 +268,11 @@ final class PageView extends View {
         invalidate();
     }
 
+    /** Free movement: the sheet stays where it is put; only a 48 dp strip must stay on screen. */
     private void clamp() {
-        float w = pw() * scale, h = ph() * scale, m = 0.15f;
-        if (w <= getWidth()) tx = (getWidth() - w) / 2;
-        else tx = Math.max(getWidth() * (1 - m) - w, Math.min(getWidth() * m, tx));
-        if (h <= getHeight()) ty = (getHeight() - h) / 2;
-        else ty = Math.max(getHeight() * (1 - m) - h, Math.min(getHeight() * m, ty));
+        float w = pw() * scale, h = ph() * scale, k = 48 * dp;
+        tx = Math.max(k - w, Math.min(getWidth() - k, tx));
+        ty = Math.max(k - h, Math.min(getHeight() - k, ty));
     }
 
     private float px(float sx) { return (sx - tx) / scale; }
@@ -289,6 +298,7 @@ final class PageView extends View {
     boolean canRedo() { return !redo.isEmpty(); }
 
     void undo() {
+        if (poly != null) { poly = null; invalidate(); return; }   // first undo drops the unfinished line
         if (undo.isEmpty()) return;
         redo.add(marks);
         marks = undo.remove(undo.size() - 1);
@@ -513,6 +523,31 @@ final class PageView extends View {
         gestures.onTouchEvent(e);
     }
 
+    /** Variant per tool (index = tool): pen/highlight 0 freehand 1 straight; box 1 rounded; ellipse 1 circle;
+     *  cloud 0 rectangle 1 ellipse 2 freehand; arrow/line 1 multi-point. */
+    final int[] variant = new int[10];
+    private Mk poly;              // multi-point line/arrow being built (not yet in marks)
+    private boolean polyTap;      // this pen-down finished the multi-point line
+
+    private boolean freehand(int t) {
+        return ((t == PEN || t == HIGHLIGHT) && variant[t] == 0) || (t == CLOUD && variant[CLOUD] == 2);
+    }
+
+    private static boolean shapeTool(int t) {
+        return t == PEN || t == HIGHLIGHT || t == BOX || t == ELLIPSE || t == CLOUD || t == ARROW || t == LINE;
+    }
+
+    private boolean multi(int t) { return (t == ARROW || t == LINE) && variant[t] == 1; }
+
+    /** Finish the multi-point line in progress (tool / sheet change, tap on its last point). */
+    void finishPoly() {
+        if (poly == null) return;
+        Mk m = poly;
+        poly = null;
+        if (m.n() >= 2) { List<Mk> n = new ArrayList<>(marks); n.add(m); commit(n); }
+        invalidate();
+    }
+
     private void startDraw(MotionEvent e, int i) {
         mode = DRAW;
         drawId = e.getPointerId(i);
@@ -522,79 +557,103 @@ final class PageView extends View {
         activeTool = eraserEnd || button ? ERASER : tool;
         float x = px(e.getX(i)), y = py(e.getY(i));
         downX = x; downY = y;
-        cur = null; preview = null; moving = false; moveDx = moveDy = 0;
-        switch (activeTool) {
-            case PEN: case HIGHLIGHT:
-                cur = new Mk.FloatList();
-                cur.add(x, y);
-                preview = newMark(activeTool == PEN ? Mk.PEN : Mk.HIGHLIGHT);
-                break;
-            case SELECT: {
-                Mk h = topHit(x, y, 14 * dp);
-                tapSameText = h != null && h == sel && h.k == Mk.TEXT;   // tap again on selected text = edit
-                setSel(h);
-                moving = h != null;
-                break;
-            }
-            case ERASER: erase(x, y); break;
-            default: break;
+        cur = null; preview = null; moving = false; moveDx = moveDy = 0; polyTap = false;
+        if (poly != null && activeTool != tool) finishPoly();
+        if (poly != null && multi(activeTool)) {
+            int n = poly.n();
+            if (Math.hypot(x - poly.x(n - 1), y - poly.y(n - 1)) * scale < 16 * dp) { polyTap = true; finishPoly(); return; }
+            float[] q = java.util.Arrays.copyOf(poly.p, poly.p.length + 2);
+            q[q.length - 2] = x; q[q.length - 1] = y;
+            poly.p = q;
+            pathCache.remove(poly);
+            invalidate();
+            return;
         }
+        if (freehand(activeTool)) {
+            cur = new Mk.FloatList();
+            cur.add(x, y);
+            preview = newMark(activeTool == PEN ? Mk.PEN : activeTool == HIGHLIGHT ? Mk.HIGHLIGHT : Mk.CLOUD);
+            if (activeTool == CLOUD) preview.flags = Mk.POLY;
+            preview.p = cur.toArray();
+        } else if (activeTool == SELECT) {
+            Mk h = topHit(x, y, 14 * dp);
+            tapSameText = h != null && h == sel && h.k == Mk.TEXT;   // tap again on selected text = edit
+            setSel(h);
+            moving = h != null;
+        } else if (activeTool == ERASER) erase(x, y);
         invalidate();
     }
 
     private void moveDraw(float sx, float sy) {
         float x = px(sx), y = py(sy);
-        switch (activeTool) {
-            case PEN: case HIGHLIGHT: {
-                float[] a = cur.a; int n = cur.n;
-                float min = 0.6f / scale;   // ~0.6 screen px
-                if (Math.abs(a[n - 2] - x) < min && Math.abs(a[n - 1] - y) < min) return;
-                cur.add(x, y);
-                preview.p = cur.toArray();
-                pathCache.remove(preview);
-                break;
-            }
-            case BOX: case ELLIPSE: case CLOUD: case ARROW: case LINE: {
-                int kind = activeTool == BOX ? Mk.BOX : activeTool == ELLIPSE ? Mk.ELLIPSE : activeTool == CLOUD ? Mk.CLOUD : Mk.ARROW;
-                if (preview == null) {
-                    if (Math.hypot(x - downX, y - downY) * scale < 6 * dp) return;
-                    preview = newMark(kind);
-                    if (activeTool == LINE) preview.heads = 0;
-                }
-                preview.p = new float[]{downX, downY, x, y};
-                pathCache.remove(preview);
-                break;
-            }
-            case SELECT:
-                if (moving) { moveDx = x - downX; moveDy = y - downY; }
-                break;
-            case ERASER: erase(x, y); break;
-            default: break;
+        if (poly != null && multi(activeTool)) {
+            if (polyTap) return;
+            poly.p[poly.p.length - 2] = x; poly.p[poly.p.length - 1] = y;
+            pathCache.remove(poly);
+            invalidate();
+            return;
         }
+        if (freehand(activeTool)) {
+            float[] a = cur.a; int n = cur.n;
+            float min = 0.6f / scale;   // ~0.6 screen px
+            if (Math.abs(a[n - 2] - x) < min && Math.abs(a[n - 1] - y) < min) return;
+            cur.add(x, y);
+            preview.p = cur.toArray();
+            pathCache.remove(preview);
+        } else if (shapeTool(activeTool)) {
+            if (preview == null) {
+                if (Math.hypot(x - downX, y - downY) * scale < 6 * dp) return;
+                int t = activeTool, v = variant[t];
+                int kind = t == PEN ? Mk.PEN : t == HIGHLIGHT ? Mk.HIGHLIGHT : t == BOX ? Mk.BOX : t == ELLIPSE ? Mk.ELLIPSE
+                        : t == CLOUD ? Mk.CLOUD : Mk.ARROW;
+                preview = newMark(kind);
+                if (t == LINE) preview.heads = 0;
+                if (t == HIGHLIGHT) preview.flags = Mk.STRAIGHT;
+                if (t == BOX && v == 1) preview.flags = Mk.ROUND;
+                if (t == CLOUD && v == 1) preview.flags = Mk.OVAL;
+            }
+            float ex = x, ey = y;
+            if (activeTool == ELLIPSE && variant[ELLIPSE] == 1) {   // perfect circle
+                float d = Math.max(Math.abs(x - downX), Math.abs(y - downY));
+                ex = downX + Math.signum(x - downX) * d; ey = downY + Math.signum(y - downY) * d;
+            }
+            preview.p = new float[]{downX, downY, ex, ey};
+            pathCache.remove(preview);
+        } else if (activeTool == SELECT) {
+            if (moving) { moveDx = x - downX; moveDy = y - downY; }
+        } else if (activeTool == ERASER) erase(x, y);
         invalidate();
     }
 
     private void endDraw(float sx, float sy) {
         float x = px(sx), y = py(sy);
         Mk done = null;
-        switch (activeTool) {
-            case PEN: case HIGHLIGHT: done = preview; break;
-            case BOX: case ELLIPSE: case CLOUD: case ARROW: case LINE: done = preview; break;
-            case TEXT: {
-                Mk h = topHit(x, y, 10 * dp);
-                if (listener != null) listener.onTextRequest(x, y, h != null && h.k == Mk.TEXT ? h : null);
-                break;
+        if (poly != null || polyTap) { invalidate(); return; }   // multi-point line: keeps going until its last point is tapped
+        if (freehand(activeTool)) {
+            done = preview;
+            if (done != null && done.k == Mk.CLOUD) {   // a freehand cloud needs a real outline
+                android.graphics.RectF b = new android.graphics.RectF(done.p[0], done.p[1], done.p[0], done.p[1]);
+                for (int k = 0; k < done.p.length; k += 2) b.union(done.p[k], done.p[k + 1]);
+                if (done.n() < 3 || Math.max(b.width(), b.height()) < done.bump * 1.5) done = null;
             }
-            case SELECT:
-                if (moving && sel != null && Math.hypot(moveDx, moveDy) * scale > 3 * dp) {
-                    Mk m = sel.moved(moveDx, moveDy);
-                    int i = marks.indexOf(sel);
-                    if (i >= 0) { List<Mk> n = new ArrayList<>(marks); n.set(i, m); sel = m; commit(n); }
-                } else if (tapSameText && sel != null && listener != null) {
-                    listener.onTextRequest(sel.x(0), sel.y(0), sel);
-                }
-                break;
-            default: break;
+        } else if (shapeTool(activeTool)) {
+            done = preview;
+            if (done != null && multi(activeTool)) {   // first segment drawn: keep adding corners
+                poly = done;
+                preview = null;
+                done = null;
+            }
+        } else if (activeTool == TEXT) {
+            Mk h = topHit(x, y, 10 * dp);
+            if (listener != null) listener.onTextRequest(x, y, h != null && h.k == Mk.TEXT ? h : null);
+        } else if (activeTool == SELECT) {
+            if (moving && sel != null && Math.hypot(moveDx, moveDy) * scale > 3 * dp) {
+                Mk m = sel.moved(moveDx, moveDy);
+                int i = marks.indexOf(sel);
+                if (i >= 0) { List<Mk> n = new ArrayList<>(marks); n.set(i, m); sel = m; commit(n); }
+            } else if (tapSameText && sel != null && listener != null) {
+                listener.onTextRequest(sel.x(0), sel.y(0), sel);
+            }
         }
         if (activeTool == ERASER && erased != null) { commit(erased); erased = null; }
         preview = null; cur = null; moving = false; moveDx = moveDy = 0;
@@ -682,6 +741,13 @@ final class PageView extends View {
             } else drawMark(c, m);
         }
         if (preview != null) drawMark(c, preview);
+        if (poly != null) {
+            drawMark(c, poly);
+            ui.setStyle(Paint.Style.FILL);
+            ui.setColor(0xFF1E88E5);
+            for (int k = 0; k < poly.n(); k++)
+                c.drawCircle(poly.x(k), poly.y(k), (k == poly.n() - 1 ? 7 : 4) * dp / scale, ui);
+        }
         c.restore();
         if (sel != null && sel.page == page) {
             RectF b = sel.bounds();
