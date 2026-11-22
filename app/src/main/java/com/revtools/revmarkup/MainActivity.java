@@ -441,6 +441,29 @@ public final class MainActivity extends Activity implements PageView.Listener {
         home.refresh();
     }
 
+    private FileBrowser browser;
+    private boolean browserAdd;
+
+    private FileBrowser browser() {
+        if (browser == null) browser = new FileBrowser(this, new FileBrowser.Host() {
+            @Override public List<Uri> folders() {
+                List<Uri> l = new ArrayList<>();
+                for (Uri t : linked()) if (!hiddenSet().contains(t.toString())) l.add(t);
+                return l;
+            }
+            @Override public void open(Uri d, Uri tree, String folderId, String where) {
+                if (doc != null && d.equals(srcUri)) { showEditor(); return; }
+                confirmDiscard(() -> MainActivity.this.open(d, tree, folderId, false, where));
+            }
+            @Override public void addFolder() { browserAdd = true; pickTree(REQ_TREE, null); }
+            @Override public void browseOther() { confirmDiscard(MainActivity.this::pickFile); }
+        });
+        return browser;
+    }
+
+    /** Open: pop-up browser over the app (✕ / Back / touch outside closes it). */
+    private void showBrowser() { browser().show(); }
+
     /** Close button: unsaved markups -> Save / Keep as draft / Cancel, then home. */
     private void closeFile() {
         view.finishPoly();
@@ -1260,7 +1283,7 @@ public final class MainActivity extends Activity implements PageView.Listener {
             final String folder = r.folder.isEmpty() ? null : r.folder;
             confirmDiscard(() -> open(u, tree, folder, false, r.where));
         }
-        @Override public void onBrowse() { confirmDiscard(MainActivity.this::pickFile); }   // Android picker: all accounts
+        @Override public void onBrowse() { showBrowser(); }
         @Override public void onBrowseAt(Uri file) { confirmDiscard(() -> pickFileAt(file)); }
         @Override public List<Uri> seenFiles() { return seen(); }
         @Override public void forgetSeen(Uri file) {
@@ -1270,7 +1293,7 @@ public final class MainActivity extends Activity implements PageView.Listener {
         }
         @Override public boolean hidden(String key) { return hiddenSet().contains(key); }
         @Override public void onLinkTablet() { pickTree(REQ_TREE_TABLET, null); }
-        @Override public void onOpenOther() { confirmDiscard(MainActivity.this::pickFile); }
+        @Override public void onOpenOther() { showBrowser(); }
         @Override public void onSettings() { settings(); }
         @Override public List<Uri> linkedFolders() { return linked(); }
         @Override public void unlinkFolder(Uri tree) {
@@ -1372,7 +1395,11 @@ public final class MainActivity extends Activity implements PageView.Listener {
 
     @Override protected void onActivityResult(int req, int res, Intent data) {
         super.onActivityResult(req, res, data);
-        if (res != RESULT_OK || data == null || data.getData() == null) { pendingAfterSave = null; return; }
+        if (res != RESULT_OK || data == null || data.getData() == null) {
+            pendingAfterSave = null;
+            if (req == REQ_TREE && browserAdd) { browserAdd = false; browser().show(); }   // back to the pop-up
+            return;
+        }
         Uri u = data.getData();
         keepPermission(u, data.getFlags());
         if (req == REQ_OPEN) { rememberSeen(u); open(u, null, null, true, HomeView.provider(u.getAuthority())); }
@@ -1382,7 +1409,10 @@ public final class MainActivity extends Activity implements PageView.Listener {
                     Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_WRITE_URI_PERMISSION); }
             catch (Exception e) { toast("This location can't be kept - choose another folder."); pendingAfterSave = null; return; }
             link(u);
-            if (req == REQ_TREE || req == REQ_TREE_TABLET) {
+            if (req == REQ_TREE && browserAdd) {
+                browserAdd = false;
+                browser().showFolder(u);
+            } else if (req == REQ_TREE || req == REQ_TREE_TABLET) {
                 home.openTreeRoot(u, HomeView.isTablet(u.getAuthority()));
             } else {
                 final Uri src = srcUri; final String[][] f = new String[1][];
