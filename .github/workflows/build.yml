@@ -25,11 +25,11 @@ jobs:
         env: { VERSION_CODE: "${{ github.run_number }}" }
         run: gradle --no-daemon :app:assembleRelease
       - name: Rename
-        run: cp app/build/outputs/apk/release/app-release.apk RevMarkup-1.0.${{ github.run_number }}.apk
+        run: cp app/build/outputs/apk/release/app-release.apk RevMarkup-2.0.${{ github.run_number }}.apk
       - uses: actions/upload-artifact@v4
         with: { name: RevMarkup-apk, path: "RevMarkup-*.apk" }
       - name: Publish release (download link for the tablet)
         env: { GH_TOKEN: "${{ github.token }}" }
         run: |
-          gh release create "v1.0.${{ github.run_number }}" RevMarkup-1.0.${{ github.run_number }}.apk \
-            --title "RevMarkup 1.0.${{ github.run_number }}" --notes "Install on the tablet: open this page, tap the .apk." --latest
+          gh release create "v2.0.${{ github.run_number }}" RevMarkup-2.0.${{ github.run_number }}.apk \
+            --title "RevMarkup 2.0.${{ github.run_number }}" --notes "Install on the tablet: open this page, tap the .apk." --latest

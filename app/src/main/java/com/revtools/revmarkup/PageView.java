@@ -45,6 +45,8 @@ final class PageView extends View {
     int tool = PEN, sizeIdx = 1;
     String color = "#E53935";
     boolean fingerDraw;
+    boolean textNoBox;          // new text without a frame (Text tool; Comment note keeps the frame)
+    float eraserDp = 8;         // eraser reach on screen
     Mk sel;
 
     // view transform: screen = pt * scale + t
@@ -118,11 +120,28 @@ final class PageView extends View {
                 return false;
             }
         });
-        setBackgroundColor(0xFFE4E7EB);
+        setBackgroundColor(U.CANVAS);
         setFocusable(true);
     }
 
     void setListener(Listener l) { listener = l; }
+
+    /** Small picture of the sheet on screen (for the home screen cards), or null. */
+    Bitmap thumb(int maxW) {
+        synchronized (cache) {
+            Bitmap b = cache.get(page);
+            if (b == null || b.isRecycled() || b.getWidth() == 0) return null;
+            float f = Math.min(1f, maxW / (float) b.getWidth());
+            return Bitmap.createScaledBitmap(b, Math.max(1, Math.round(b.getWidth() * f)), Math.max(1, Math.round(b.getHeight() * f)), true);
+        }
+    }
+
+    /** Go to a markup's sheet and select it (comment list). */
+    void select(Mk m) {
+        if (doc == null || m == null) return;
+        if (m.page != page) showPage(m.page);
+        setSel(m);
+    }
 
     // ------------------------------------------------------------ document
     void setDoc(PdfDoc d, List<Mk> loaded, int startPage) {
@@ -345,6 +364,7 @@ final class PageView extends View {
         Mk m = newMark(Mk.TEXT);
         m.p = new float[]{x, y};
         m.text = text;
+        if (textNoBox) m.flags |= Mk.NOBOX;
         List<Mk> n = new ArrayList<>(marks);
         n.add(m);
         commit(n);
@@ -672,7 +692,7 @@ final class PageView extends View {
     private void erase(float x, float y) {
         Mk h = null;
         List<Mk> src = erased != null ? erased : marks;
-        float tol = 8 * dp / scale;
+        float tol = eraserDp * dp / scale;
         for (int i = src.size() - 1; i >= 0; i--) {
             Mk m = src.get(i);
             if (m.page == page && m.hit(x, y, tol)) { h = m; break; }
@@ -755,13 +775,13 @@ final class PageView extends View {
             float pad = 5 * dp;
             ui.setStyle(Paint.Style.STROKE);
             ui.setStrokeWidth(1.5f * dp);
-            ui.setColor(0xFF1E88E5);
+            ui.setColor(U.BLUE);
             ui.setPathEffect(new DashPathEffect(new float[]{6 * dp, 4 * dp}, 0));
             c.drawRect(b.left * scale + tx - pad, b.top * scale + ty - pad, b.right * scale + tx + pad, b.bottom * scale + ty + pad, ui);
             ui.setPathEffect(null);
         }
         if (hoverX >= 0 && mode != DRAW) {
-            float r = tool == ERASER ? 8 * dp : Math.max(2 * dp, (float) ((tool == HIGHLIGHT ? Mk.HL_W : Mk.PEN_W)[sizeIdx] * unit() * scale / 2));
+            float r = tool == ERASER ? eraserDp * dp : Math.max(2 * dp, (float) ((tool == HIGHLIGHT ? Mk.HL_W : Mk.PEN_W)[sizeIdx] * unit() * scale / 2));
             ui.setStyle(Paint.Style.STROKE);
             ui.setStrokeWidth(1 * dp);
             ui.setColor(0x99000000);
