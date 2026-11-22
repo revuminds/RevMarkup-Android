@@ -61,7 +61,7 @@ final class PageView extends View {
     private final Runnable tileTask = this::requestTile;
 
     // input
-    private static final int NONE = 0, DRAW = 1, PAN = 2;
+    private static final int NONE = 0, DRAW = 1, PAN = 2, HAND = 3;
     private int mode = NONE, drawId = -1, activeTool;
     private float lastX, lastY, downX, downY;
     private Mk.FloatList cur;
@@ -228,6 +228,10 @@ final class PageView extends View {
 
     // ------------------------------------------------------------ view transform
     @Override protected void onSizeChanged(int w, int h, int ow, int oh) {
+        // side-edge Back gesture off over the sheet (Android allows up to 200 dp per edge; centred)
+        int ex = Math.round(48 * dp), eh = Math.min(h, Math.round(200 * dp)), top = (h - eh) / 2;
+        setSystemGestureExclusionRects(java.util.Arrays.asList(
+                new android.graphics.Rect(0, top, ex, top + eh), new android.graphics.Rect(w - ex, top, w, top + eh)));
         needFit = true;
         if (doc != null) { synchronized (cache) { cache.clear(); cacheScale.clear(); } loadPage(); }
     }
@@ -398,11 +402,15 @@ final class PageView extends View {
 
     @Override public boolean onTouchEvent(MotionEvent e) {
         if (doc == null) return false;
-        int act = e.getActionMasked();
-        if (act == MotionEvent.ACTION_DOWN) {
-            mode = NONE;
-            if (isPen(e, 0) || fingerDraw) startDraw(e, 0);
-            else startPan(e);
+        int act = e.getActionMasked(), ai = e.getActionIndex();
+        long now = SystemClock.uptimeMillis();
+        if (isPen(e, ai)) lastPenAt = now;
+
+        // 1. The pen always wins: any pen touch starts drawing, whatever the hand is doing.
+        if ((act == MotionEvent.ACTION_DOWN || act == MotionEvent.ACTION_POINTER_DOWN) && isPen(e, ai)) {
+            if (mode == DRAW) return true;
+            if (mode == PAN && now - panStartAt < 800) undoPan();   // the palm landed first and moved the sheet
+            startDraw(e, ai);
             return true;
         }
         if (mode == DRAW) {
@@ -412,42 +420,75 @@ final class PageView extends View {
             if (act == MotionEvent.ACTION_MOVE) {
                 for (int h = 0; h < e.getHistorySize(); h++) moveDraw(e.getHistoricalX(i, h), e.getHistoricalY(i, h));
                 moveDraw(e.getX(i), e.getY(i));
-            } else if (act == MotionEvent.ACTION_UP || (act == MotionEvent.ACTION_POINTER_UP && e.getActionIndex() == i)) {
+            } else if (act == MotionEvent.ACTION_UP || (act == MotionEvent.ACTION_POINTER_UP && ai == i)) {
                 if ((e.getFlags() & MotionEvent.FLAG_CANCELED) != 0) cancelDraw();
                 else { moveDraw(e.getX(i), e.getY(i)); endDraw(e.getX(i), e.getY(i)); }
-                mode = NONE;
+                mode = act == MotionEvent.ACTION_UP ? NONE : HAND;   // hand still down: keep ignoring it
+                lastPenAt = now;
             }
-            return true;   // other pointers (palm, fingers) are ignored while drawing
+            return true;   // palm / fingers are ignored while drawing
         }
-        if (mode == PAN) {
-            if (act == MotionEvent.ACTION_POINTER_DOWN && isPen(e, e.getActionIndex())) {
-                // the pen arrived while a palm/finger was down: the pen wins
-                startDraw(e, e.getActionIndex());
-                return true;
-            }
-            scaler.onTouchEvent(e);
-            gestures.onTouchEvent(e);
-            if (act == MotionEvent.ACTION_POINTER_DOWN && e.getPointerCount() == 2) twoDownAt = SystemClock.uptimeMillis();
-            if (act == MotionEvent.ACTION_MOVE && !scaler.isInProgress()) {
-                float x = avgX(e), y = avgY(e);
-                if (Math.hypot(x - downX, y - downY) > 12 * dp) panMoved = true;
-                if (panMoved) { tx += x - lastX; ty += y - lastY; clamp(); invalidate(); scheduleTile(); }
-                lastX = x; lastY = y;
-            }
-            if (act == MotionEvent.ACTION_POINTER_DOWN || act == MotionEvent.ACTION_POINTER_UP) {
-                // re-anchor so the page does not jump when fingers are added / lifted
-                int skip = act == MotionEvent.ACTION_POINTER_UP ? e.getActionIndex() : -1;
-                lastX = avgX(e, skip); lastY = avgY(e, skip);
-                if (act == MotionEvent.ACTION_POINTER_UP && e.getPointerCount() == 2 && !panMoved && !scaled
-                        && SystemClock.uptimeMillis() - twoDownAt < 300) {
-                    undo();   // two-finger tap = undo
-                    twoDownAt = 0;
-                }
-            }
+
+        // 2. Hand touches. Ignored while the pen is near the screen or just used, and for palm-sized contacts.
+        boolean penNear = hovering || now - lastPenAt < PEN_GRACE_MS;
+        if (act == MotionEvent.ACTION_DOWN) {
+            if (fingerDraw && !isPalm(e, 0)) { startDraw(e, 0); return true; }
+            if (penNear || isPalm(e, 0)) { mode = HAND; return true; }
+            startPan(e);
+            return true;
+        }
+        if (mode == HAND || mode == NONE) {
             if (act == MotionEvent.ACTION_UP || act == MotionEvent.ACTION_CANCEL) mode = NONE;
             return true;
         }
+        // mode == PAN
+        if (act == MotionEvent.ACTION_CANCEL || (e.getFlags() & MotionEvent.FLAG_CANCELED) != 0) {
+            undoPan();          // Android decided it was a palm
+            mode = act == MotionEvent.ACTION_CANCEL ? NONE : HAND;
+            return true;
+        }
+        if (penNear || (act == MotionEvent.ACTION_POINTER_DOWN && isPalm(e, ai))) {
+            if (now - panStartAt < 800) undoPan();
+            mode = HAND;
+            return true;
+        }
+        scaler.onTouchEvent(e);
+        gestures.onTouchEvent(e);
+        if (act == MotionEvent.ACTION_POINTER_DOWN && e.getPointerCount() == 2) twoDownAt = now;
+        if (act == MotionEvent.ACTION_MOVE && !scaler.isInProgress()) {
+            float x = avgX(e), y = avgY(e);
+            if (Math.hypot(x - downX, y - downY) > 12 * dp) panMoved = true;
+            if (panMoved) { tx += x - lastX; ty += y - lastY; clamp(); invalidate(); scheduleTile(); }
+            lastX = x; lastY = y;
+        }
+        if (act == MotionEvent.ACTION_POINTER_DOWN || act == MotionEvent.ACTION_POINTER_UP) {
+            // re-anchor so the page does not jump when fingers are added / lifted
+            int skip = act == MotionEvent.ACTION_POINTER_UP ? ai : -1;
+            lastX = avgX(e, skip); lastY = avgY(e, skip);
+            if (act == MotionEvent.ACTION_POINTER_UP && e.getPointerCount() == 2 && !panMoved && !scaled
+                    && now - twoDownAt < 300) {
+                undo();   // two-finger tap = undo
+                twoDownAt = 0;
+            }
+        }
+        if (act == MotionEvent.ACTION_UP) mode = NONE;
         return true;
+    }
+
+    private static final long PEN_GRACE_MS = 1000;
+    private long lastPenAt, panStartAt;
+    private boolean hovering;
+    private float panTx, panTy, panScale;
+
+    /** A contact much bigger than a fingertip (side of the hand, wrist). */
+    private boolean isPalm(MotionEvent e, int i) {
+        return e.getTouchMajor(i) > 60 * dp || e.getToolMajor(i) > 60 * dp;
+    }
+
+    private void undoPan() {
+        tx = panTx; ty = panTy; scale = panScale;
+        invalidate();
+        scheduleTile();
     }
 
     private float avgX(MotionEvent e) { return avgX(e, -1); }
@@ -466,6 +507,7 @@ final class PageView extends View {
     private void startPan(MotionEvent e) {
         mode = PAN;
         panMoved = false; scaled = false;
+        panTx = tx; panTy = ty; panScale = scale; panStartAt = SystemClock.uptimeMillis();
         lastX = downX = e.getX(); lastY = downY = e.getY();
         scaler.onTouchEvent(e);
         gestures.onTouchEvent(e);
@@ -590,8 +632,9 @@ final class PageView extends View {
 
     @Override public boolean onHoverEvent(MotionEvent e) {
         if (isPen(e, 0) && e.getToolType(0) != MotionEvent.TOOL_TYPE_MOUSE) {
-            if (e.getActionMasked() == MotionEvent.ACTION_HOVER_EXIT) hoverX = -1;
-            else { hoverX = e.getX(); hoverY = e.getY(); }
+            lastPenAt = SystemClock.uptimeMillis();
+            if (e.getActionMasked() == MotionEvent.ACTION_HOVER_EXIT) { hoverX = -1; hovering = false; }
+            else { hoverX = e.getX(); hoverY = e.getY(); hovering = true; }
             invalidate();
             return true;
         }

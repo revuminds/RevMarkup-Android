@@ -208,12 +208,27 @@ public final class MainActivity extends Activity implements PageView.Listener {
         body.addView(stage, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 1));
         root.addView(body, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1));
         setContentView(root);
+        hideNavBar();
 
         view.tool = prefs.getInt("tool", PageView.PEN);
         view.color = prefs.getString("color", COLORS[0]);
         view.sizeIdx = prefs.getInt("size", 1);
         refreshTools();
         refreshBar();
+    }
+
+    /** Hide the gesture bar: a pen or palm near the bottom edge must not send the app Home.
+     *  A swipe from the edge shows it again for a moment. */
+    private void hideNavBar() {
+        android.view.WindowInsetsController c = getWindow().getInsetsController();
+        if (c == null) return;
+        c.setSystemBarsBehavior(android.view.WindowInsetsController.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE);
+        c.hide(WindowInsets.Type.navigationBars());
+    }
+
+    @Override public void onWindowFocusChanged(boolean hasFocus) {
+        super.onWindowFocusChanged(hasFocus);
+        if (hasFocus) hideNavBar();
     }
 
     private Icon barIcon(LinearLayout bar, int id, View.OnClickListener l) {
