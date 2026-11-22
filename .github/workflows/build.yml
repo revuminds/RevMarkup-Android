@@ -1,0 +1,35 @@
+name: Build APK
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with: { distribution: temurin, java-version: "17" }
+      - uses: gradle/actions/setup-gradle@v4
+        with: { gradle-version: "8.14.3" }
+      - name: Get PDFium (pinned + checksum)
+        run: |
+          set -e
+          curl -sSL -o p.tgz "https://github.com/bblanchon/pdfium-binaries/releases/download/chromium%2F8165/pdfium-android-arm64.tgz"
+          echo "ce4f17fea8881cdf163950748ab90854cf33f296309fab68de9441a1d41ff6cc  p.tgz" | sha256sum -c -
+          mkdir -p app/src/main/cpp/pdfium
+          tar xzf p.tgz -C app/src/main/cpp/pdfium
+      - name: Build
+        env: { VERSION_CODE: "${{ github.run_number }}" }
+        run: gradle --no-daemon :app:assembleRelease
+      - name: Rename
+        run: cp app/build/outputs/apk/release/app-release.apk RevMarkup-1.0.${{ github.run_number }}.apk
+      - uses: actions/upload-artifact@v4
+        with: { name: RevMarkup-apk, path: "RevMarkup-*.apk" }
+      - name: Publish release (download link for the tablet)
+        env: { GH_TOKEN: "${{ github.token }}" }
+        run: |
+          gh release create "v1.0.${{ github.run_number }}" RevMarkup-1.0.${{ github.run_number }}.apk \
+            --title "RevMarkup 1.0.${{ github.run_number }}" --notes "Install on the tablet: open this page, tap the .apk." --latest

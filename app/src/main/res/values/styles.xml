@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <style name="Rev" parent="@android:style/Theme.Material.Light.NoActionBar">
+        <item name="android:colorAccent">#E53935</item>
+        <item name="android:colorPrimary">#1E2329</item>
+        <item name="android:windowBackground">@android:color/black</item>
+        <item name="android:statusBarColor">#1E2329</item>
+        <item name="android:navigationBarColor">#1E2329</item>
+        <item name="android:windowLightStatusBar">false</item>
+    </style>
+</resources>

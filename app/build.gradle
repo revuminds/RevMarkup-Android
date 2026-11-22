@@ -1,0 +1,36 @@
+plugins { id "com.android.application" }
+
+android {
+    namespace "com.revtools.revmarkup"
+    compileSdk 35
+    defaultConfig {
+        applicationId "com.revtools.revmarkup"
+        minSdk 29
+        targetSdk 35
+        versionCode Integer.parseInt(System.getenv("VERSION_CODE") ?: "1")
+        versionName "1.0." + (System.getenv("VERSION_CODE") ?: "0")
+        ndk { abiFilters "arm64-v8a" }
+        externalNativeBuild { cmake { arguments "-DANDROID_STL=none" } }
+    }
+    signingConfigs {
+        // Fixed key so every new APK installs as an update over the old one.
+        release {
+            storeFile file("revmarkup.jks")
+            storePassword "revmarkup-tab"
+            keyAlias "revmarkup"
+            keyPassword "revmarkup-tab"
+        }
+    }
+    buildTypes {
+        release {
+            minifyEnabled true
+            shrinkResources true
+            proguardFiles getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro"
+            signingConfig signingConfigs.release
+        }
+    }
+    externalNativeBuild { cmake { path "src/main/cpp/CMakeLists.txt" } }
+    compileOptions { sourceCompatibility JavaVersion.VERSION_17; targetCompatibility JavaVersion.VERSION_17 }
+    packagingOptions { jniLibs { useLegacyPackaging false } }
+    lint { abortOnError false; checkReleaseBuilds false }
+}
