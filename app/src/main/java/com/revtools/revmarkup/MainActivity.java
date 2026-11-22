@@ -1240,15 +1240,7 @@ public final class MainActivity extends Activity implements PageView.Listener {
             final String folder = r.folder.isEmpty() ? null : r.folder;
             confirmDiscard(() -> open(u, tree, folder, false, r.where));
         }
-        @Override public void onBrowse() {
-            new AlertDialog.Builder(MainActivity.this).setTitle("Browse Drive / OneDrive")
-                    .setItems(new CharSequence[]{"Open a PDF…", "Add a project folder to the home screen…"}, (d, w) -> {
-                        toast("Open the menu (☰) in the next screen to choose Google Drive or OneDrive and the account.");
-                        if (w == 0) confirmDiscard(MainActivity.this::pickFile);
-                        else pickTree(REQ_TREE, null);
-                    })
-                    .setNegativeButton("Cancel", null).show();
-        }
+        @Override public void onBrowse() { confirmDiscard(MainActivity.this::pickFile); }   // Android picker: all accounts
         @Override public void onBrowseAt(Uri file) { confirmDiscard(() -> pickFileAt(file)); }
         @Override public List<Uri> seenFiles() { return seen(); }
         @Override public void forgetSeen(Uri file) {
@@ -1474,17 +1466,9 @@ public final class MainActivity extends Activity implements PageView.Listener {
         if (asNew) { saveAsPicker(); return; }
         if (outUri != null) { doSave(outUri, false); return; }
         if (treeUri != null && folderId != null) { saveIntoFolder(); return; }
-        // opened from elsewhere: is it inside a linked folder?
-        final Uri src = srcUri; final List<Uri> trees = linked(); final String[][] f = new String[1][];
-        worker.job(() -> f[0] = folderOf(src, trees), err -> {
-            if (f[0] != null) { treeUri = Uri.parse(f[0][0]); folderId = f[0][1]; saveIntoFolder(); return; }
-            new AlertDialog.Builder(this).setTitle("Save next to the original")
-                    .setMessage("Android needs your OK once for this folder. In the next screen go to the folder that holds “"
-                            + srcName + "” and tap “Use this folder”. After that, saving there is automatic.")
-                    .setPositiveButton("Choose folder", (d, w) -> pickTree(REQ_TREE_SAVE, srcUri))
-                    .setNegativeButton("Save elsewhere…", (d, w) -> saveAsPicker())
-                    .setNeutralButton("Cancel", (d, w) -> pendingAfterSave = null).show();
-        });
+        // first save of a file opened from the picker: Android's save screen, in the drawing's folder, name filled in;
+        // later saves go to that same file without asking
+        saveAsPicker();
     }
 
     private void saveAsPicker() {

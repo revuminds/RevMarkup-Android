@@ -235,7 +235,7 @@ final class HomeView extends LinearLayout {
             for (Uri f : files) {
                 final Uri ff = f;
                 String an = account(f);
-                navItem(icon, an.isEmpty() ? prov : "Account " + an, "Browse · last used here", false, v -> host.onBrowseAt(ff),
+                navItem(icon, an.isEmpty() ? prov : "Account " + an, "Open from this account", false, v -> host.onBrowseAt(ff),
                         v -> { confirmForget(ff); return true; });
             }
         }
