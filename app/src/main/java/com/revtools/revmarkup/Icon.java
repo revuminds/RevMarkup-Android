@@ -46,7 +46,7 @@ final class Icon extends View {
         p.setColor(col);
         p.setStrokeWidth(1.9f);
         p.setStyle(Paint.Style.STROKE);
-        draw(c);
+        glyph(c);
         c.restore();
     }
 
@@ -57,7 +57,7 @@ final class Icon extends View {
         c.drawPath(path, p);
     }
 
-    private void draw(Canvas c) {
+    private void glyph(Canvas c) {
         switch (id) {
             case SELECT: line(c, 6, 3, 6, 19, 10, 15, 13, 21, 15.5f, 20, 12.5f, 14, 18, 14, 6, 3); break;
             case PEN: line(c, 4, 20, 5, 15, 16, 4, 20, 8, 9, 19, 4, 20); line(c, 14, 6, 18, 10); break;

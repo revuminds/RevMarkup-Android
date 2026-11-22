@@ -81,7 +81,7 @@ public final class MainActivity extends Activity implements PageView.Listener {
         Uri u = null;
         if (Intent.ACTION_VIEW.equals(i.getAction())) u = i.getData();
         else if (Intent.ACTION_SEND.equals(i.getAction())) u = i.getParcelableExtra(Intent.EXTRA_STREAM);
-        if (u != null) { setIntent(new Intent()); confirmDiscard(() -> open(u, false)); }
+        if (u != null) { final Uri fu = u; setIntent(new Intent()); confirmDiscard(() -> open(fu, false)); }
     }
 
     @Override protected void onPause() { super.onPause(); saveDraft(); }
