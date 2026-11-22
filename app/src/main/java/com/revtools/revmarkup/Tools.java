@@ -36,7 +36,10 @@ final class Tools {
         boolean snap = true;   // hold to snap shape (next update)
         int type;              // shape type / cloud type / highlighter: 1 = straight
         boolean border;        // text box border
-        int erase;             // 0 whole stroke, 1 partial (later)
+        int erase;             // 0 whole stroke, 1 partial
+        float[] mm = {0.18f, 0.25f, 0.35f};   // width presets in paper mm (long-press a preset = store current width)
+        float width = 0.25f;   // current width in paper mm (slider); size = preset it came from
+        int opacity = 40;      // highlighter opacity %
 
         String color() {
             if (colorSel == 3 && !custom.isEmpty()) return custom;
@@ -47,7 +50,8 @@ final class Tools {
             JSONObject o = new JSONObject();
             o.put("colors", new JSONArray(java.util.Arrays.asList(colors)));
             o.put("colorSel", colorSel).put("custom", custom).put("size", size).put("line", line).put("stab", (double) stab)
-                    .put("snap", snap).put("type", type).put("border", border).put("erase", erase);
+                    .put("snap", snap).put("type", type).put("border", border).put("erase", erase)
+                    .put("mm", new JSONArray(new double[]{mm[0], mm[1], mm[2]})).put("width", (double) width).put("opacity", opacity);
             return o;
         }
 
@@ -65,6 +69,10 @@ final class Tools {
             type = clamp(o.optInt("type", type), 0, 7);
             border = o.optBoolean("border", border);
             erase = clamp(o.optInt("erase", erase), 0, 1);
+            JSONArray m = o.optJSONArray("mm");
+            if (m != null && m.length() == 3) for (int i = 0; i < 3; i++) mm[i] = (float) m.optDouble(i, mm[i]);
+            width = (float) o.optDouble("width", mm[size]);
+            opacity = clamp(o.optInt("opacity", opacity), 10, 90);
         }
     }
 
@@ -85,6 +93,14 @@ final class Tools {
             default: c = new String[]{"#D3262F", "#1F5FBF", "#1A1B1F"};
         }
         s.colors = c;
+        switch (t) {
+            case FINE: s.mm = new float[]{0.1f, 0.18f, 0.25f}; break;
+            case HL: s.mm = new float[]{3, 5, 8}; break;
+            case SHAPES: case CLOUD: s.mm = new float[]{0.25f, 0.35f, 0.5f}; break;
+            default: s.mm = new float[]{0.18f, 0.25f, 0.35f};
+        }
+        s.width = s.mm[s.size];
+        s.line = t == PEN || t == PENCIL ? LINE_VARIABLE : LINE_FIXED;
         if (t == SHAPES) s.type = 5;   // arrow: the most used shape when marking up drawings
         return s;
     }
@@ -99,6 +115,7 @@ final class Tools {
             s[t] = defaults(t);
             String j = prefs.getString("ts" + t, null);
             if (j != null) try { s[t].read(new JSONObject(j)); } catch (Exception ignored) { /* keep defaults */ }
+            clampWidth(t, s[t]);
         }
         current = clamp(prefs.getInt("tool2", PEN), 0, N - 1);
     }
@@ -114,6 +131,29 @@ final class Tools {
         prefs.edit().putInt("tool2", t).apply();
     }
 
+    /** Width range of the slider in paper mm. */
+    static float minMm(int t) { return t == HL ? 1f : 0.1f; }
+    static float maxMm(int t) { return t == HL ? 20f : 3f; }
+    static boolean hasWidth(int t) { return t != ERASER && t != TEXT && t != NOTE && t != LASSO; }
+
+    private static void clampWidth(int t, S st) {
+        for (int i = 0; i < 3; i++) st.mm[i] = Math.max(minMm(t), Math.min(maxMm(t), st.mm[i]));
+        st.width = Math.max(minMm(t), Math.min(maxMm(t), st.width));
+    }
+
+    /** Slider position 0..1000 <-> mm: squared, so the thin end gets fine steps. */
+    static int toSlider(int t, float mm) {
+        double f = (mm - minMm(t)) / (maxMm(t) - minMm(t));
+        return (int) Math.round(Math.sqrt(Math.max(0, Math.min(1, f))) * 1000);
+    }
+    static float fromSlider(int t, int p) {
+        double f = p / 1000.0;
+        float mm = (float) (minMm(t) + (maxMm(t) - minMm(t)) * f * f);
+        return mm < 1 ? Math.round(mm * 100) / 100f : Math.round(mm * 20) / 20f;
+    }
+
+    static String mmText(float mm) { return String.format(Locale.US, mm < 1 ? "%.2f mm" : "%.1f mm", mm); }
+
     static boolean penLike(int t) { return t == PEN || t == FINE || t == PENCIL; }
 
     /** Hand the current tool's settings to the sheet view. */
@@ -123,6 +163,16 @@ final class Tools {
         v.color = st.color();
         v.sizeIdx = st.size;
         v.textNoBox = false;
+        v.widthMm = hasWidth(current) ? st.width : -1;
+        int style = st.line == LINE_VARIABLE ? Mk.VAR : st.line == 2 ? Mk.DASH : st.line == 3 ? Mk.DOT : 0;
+        if (current == FINE && style == Mk.VAR) style = 0;          // fineliner: crisp, constant width
+        if (current == SHAPES && style == Mk.VAR) style = 0;        // shapes: no pressure
+        if (current == HL || current == CLOUD) style = 0;
+        v.penFlags = style | (current == FINE ? Mk.FINE : current == PENCIL ? Mk.PENCIL : 0);
+        v.stab = penLike(current) ? st.stab : 0;
+        v.snap = penLike(current) && st.snap;
+        v.hlOpacity = st.opacity;
+        v.partialErase = current == ERASER && st.erase == 1;
         switch (current) {
             case PEN: case FINE: case PENCIL: v.tool = PageView.PEN; v.variant[PageView.PEN] = 0; break;
             case HL: v.tool = PageView.HIGHLIGHT; v.variant[PageView.HIGHLIGHT] = st.type == 1 ? 1 : 0; break;
@@ -139,12 +189,11 @@ final class Tools {
         }
     }
 
-    /** Exact size label for the size presets, on the current sheet. */
-    static String sizeLabel(int t, int size, double unit) {
-        if (t == TEXT || t == NOTE) return String.format(Locale.US, "%.0f pt", Mk.FONT[size] * unit);
+    /** Size label next to the presets (text: pt on the current sheet). */
+    static String sizeLabel(int t, S st, double unit) {
+        if (t == TEXT || t == NOTE) return String.format(Locale.US, "%.0f pt", Mk.FONT[st.size] * unit);
         if (t == ERASER) return "";
-        double w = (t == HL ? Mk.HL_W : Mk.PEN_W)[size] * unit * 25.4 / 72;
-        return String.format(Locale.US, w < 1 ? "%.2f mm" : "%.1f mm", w);
+        return mmText(st.width);
     }
 
     /** Dot diameter (dp) drawn in a size preset. */

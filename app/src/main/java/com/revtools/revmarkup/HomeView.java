@@ -41,7 +41,11 @@ final class HomeView extends LinearLayout {
     interface Host {
         void onOpenFile(Uri doc, Uri tree, String folderId, String name, Uri commentsUri, String where);
         void onOpenRecent(Recents.Item r);
-        void onAddAccount();
+        void onBrowse();                    // Android picker: all Drive / OneDrive accounts are there
+        void onBrowseAt(Uri file);          // picker opened at a file seen before (account without a linked folder)
+        List<Uri> seenFiles();              // files opened from cloud accounts that have no linked folder
+        void forgetSeen(Uri file);
+        boolean hidden(String key);         // "prov:<name>" or an entry's uri
         void onLinkTablet();
         void onOpenOther();
         void onSettings();
@@ -209,23 +213,67 @@ final class HomeView extends LinearLayout {
         acc.setLetterSpacing(0.09f);
         acc.setPadding(px(12), px(20), 0, px(6));
         nav.addView(acc);
-        for (Uri t : host.linkedFolders()) {
-            if (isTablet(t.getAuthority())) continue;
-            String prov = provider(t.getAuthority());
-            final Uri ft = t;
-            navItem("Google Drive".equals(prov) ? Icon.DRIVE : "OneDrive".equals(prov) ? Icon.CLOUD : Icon.FOLDER, prov,
-                    rootName(t), mode == FOLDER && !navTablet && t.equals(tree), v -> openTreeRoot(ft, false),
-                    v -> { confirmUnlink(ft); return true; });
+        for (String prov : PROVIDERS) {
+            if (host.hidden("prov:" + prov)) continue;
+            List<Uri> trees = new ArrayList<>(), files = new ArrayList<>();
+            for (Uri t : host.linkedFolders())
+                if (!isTablet(t.getAuthority()) && prov.equals(provider(t.getAuthority())) && !host.hidden(t.toString())) trees.add(t);
+            for (Uri f : host.seenFiles())
+                if (prov.equals(provider(f.getAuthority())) && !host.hidden(f.toString()) && !covered(f)) files.add(f);
+            if (trees.isEmpty() && files.isEmpty()) continue;
+            int icon = "Google Drive".equals(prov) ? Icon.DRIVE : "OneDrive".equals(prov) ? Icon.CLOUD : Icon.FOLDER;
+            TextView ph = U.text(c, prov, 12, U.DARK_TEXT, true);
+            ph.setPadding(px(12), px(8), 0, px(2));
+            nav.addView(ph);
+            for (Uri t : trees) {
+                final Uri ft = t;
+                String an = account(t);
+                navItem(icon, rootName(t), an.isEmpty() ? "Folder" : "Account " + an + " · folder",
+                        mode == FOLDER && !navTablet && t.equals(tree), v -> openTreeRoot(ft, false),
+                        v -> { confirmUnlink(ft); return true; });
+            }
+            for (Uri f : files) {
+                final Uri ff = f;
+                String an = account(f);
+                navItem(icon, an.isEmpty() ? prov : "Account " + an, "Browse · last used here", false, v -> host.onBrowseAt(ff),
+                        v -> { confirmForget(ff); return true; });
+            }
         }
-        TextView add = U.text(c, "  +   Add account", 14, 0xFFC9CCD3, false);
+        TextView add = U.text(c, "  +   Browse Drive / OneDrive", 14, 0xFFC9CCD3, false);
         add.setGravity(Gravity.CENTER_VERTICAL);
         add.setPadding(px(12), 0, px(12), 0);
         add.setBackground(dashed());
-        add.setOnClickListener(v -> host.onAddAccount());
+        add.setOnClickListener(v -> host.onBrowse());
         nav.addView(add, U.lp(ViewGroup.LayoutParams.MATCH_PARENT, px(48), 0, px(8), 0, 0));
         View fill = new View(c);
         nav.addView(fill, new LayoutParams(1, 0, 1));
         navItem(Icon.SETTINGS, "Settings", null, false, v -> host.onSettings(), null);
+    }
+
+    static final String[] PROVIDERS = {"Google Drive", "OneDrive", "Dropbox", "Files"};
+
+    /** Google Drive document ids carry the account: "acc=2;doc=...". Empty when unknown. */
+    static String account(Uri u) {
+        String id;
+        try { id = DocumentsContract.isTreeUri(u) ? DocumentsContract.getTreeDocumentId(u) : DocumentsContract.getDocumentId(u); }
+        catch (Exception e) { return ""; }
+        id = Uri.decode(id);
+        java.util.regex.Matcher m = java.util.regex.Pattern.compile("acc=(\\d+)").matcher(id);
+        return m.find() ? m.group(1) : "";
+    }
+
+    /** Same provider + account as one of the linked folders: its row already stands for it. */
+    private boolean covered(Uri f) {
+        for (Uri t : host.linkedFolders())
+            if (String.valueOf(t.getAuthority()).equals(f.getAuthority()) && account(t).equals(account(f))) return true;
+        return false;
+    }
+
+    private void confirmForget(Uri f) {
+        new AlertDialog.Builder(getContext()).setTitle(provider(f.getAuthority()) + (account(f).isEmpty() ? "" : " · Account " + account(f)))
+                .setMessage("Remove this entry from the home screen? Nothing is deleted. It comes back when you open a file from it again.")
+                .setPositiveButton("Remove", (d, w) -> { host.forgetSeen(f); refresh(); })
+                .setNegativeButton("Cancel", null).show();
     }
 
     private android.graphics.drawable.GradientDrawable dashed() {
@@ -344,7 +392,7 @@ final class HomeView extends LinearLayout {
         List<Entry> l = new ArrayList<>();
         for (Recents.Item r : host.recents().list) {
             Entry e = new Entry();
-            e.recent = r; e.name = r.name; e.modified = r.time; e.meta = r.where;
+            e.recent = r; e.name = r.name; e.modified = r.time; e.meta = r.where; e.size = r.size;
             l.add(e);
         }
         all = l;
@@ -352,7 +400,7 @@ final class HomeView extends LinearLayout {
         updateCrumbs();
         applyFilter();
         linkTabletB.setVisibility(GONE);
-        setStatus(l.isEmpty() ? "No drawings opened yet.\nAdd your OneDrive or Google Drive project folder with “+ Add account”, "
+        setStatus(l.isEmpty() ? "No drawings opened yet.\nTap “Browse Drive / OneDrive” to open a drawing from any of your accounts, "
                 + "link a folder on this tablet, or use “Open file…”." : null);
     }
 
@@ -520,6 +568,8 @@ final class HomeView extends LinearLayout {
     }
 
     // ------------------------------------------------------------ continue reviewing
+    void refreshCards() { buildCards(); }
+
     private void buildCards() {
         Context c = getContext();
         cards.removeAllViews();
@@ -631,7 +681,7 @@ final class HomeView extends LinearLayout {
             meta.setText(e.meta == null ? "" : e.meta);
             meta.setVisibility(e.meta == null || e.meta.isEmpty() ? GONE : VISIBLE);
             mod.setText(e.dir ? "" : U.when(e.modified));
-            size.setText(e.dir || e.recent != null ? "" : U.size(e.size));
+            size.setText(e.dir || e.size < 0 ? "" : U.size(e.size));
             String p = null;
             if (e.recent != null) {
                 if (e.recent.draft && host.isCurrent(e.recent)) p = "Unsaved draft";

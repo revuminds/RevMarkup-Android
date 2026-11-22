@@ -15,7 +15,7 @@ final class Recents {
     static final class Item {
         String uri = "", out = "", name = "", tree = "", folder = "", where = "";
         int page, pages, count;
-        long time;
+        long time, size = -1;
         boolean draft;
     }
 
@@ -37,7 +37,7 @@ final class Recents {
                 r.uri = o.optString("uri"); r.out = o.optString("out"); r.name = o.optString("name");
                 r.tree = o.optString("tree"); r.folder = o.optString("folder"); r.where = o.optString("where");
                 r.page = o.optInt("page"); r.pages = o.optInt("pages"); r.count = o.optInt("count");
-                r.time = o.optLong("time"); r.draft = o.optBoolean("draft");
+                r.time = o.optLong("time"); r.draft = o.optBoolean("draft"); r.size = o.optLong("size", -1);
                 if (!r.uri.isEmpty()) list.add(r);
             }
         } catch (Exception ignored) { }
@@ -75,7 +75,7 @@ final class Recents {
         try {
             for (Item r : list) a.put(new JSONObject().put("uri", r.uri).put("out", r.out).put("name", r.name).put("tree", r.tree)
                     .put("folder", r.folder).put("where", r.where).put("page", r.page).put("pages", r.pages)
-                    .put("count", r.count).put("time", r.time).put("draft", r.draft));
+                    .put("count", r.count).put("time", r.time).put("draft", r.draft).put("size", r.size));
         } catch (Exception ignored) { }
         prefs.edit().putString("recent", a.toString()).apply();
     }

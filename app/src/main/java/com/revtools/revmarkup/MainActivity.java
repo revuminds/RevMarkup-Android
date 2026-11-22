@@ -120,6 +120,7 @@ public final class MainActivity extends Activity implements PageView.Listener {
         work = new File(dir, "current.pdf");
         buildUi();
         view.fingerDraw = prefs.getBoolean("fingerDraw", false);
+        view.twoFingerPan = prefs.getBoolean("twoFingerPan", true);
         restoreDraft(() -> { home.restore(); handleIntent(getIntent()); });
         showCrashIfAny();
     }
@@ -422,7 +423,7 @@ public final class MainActivity extends Activity implements PageView.Listener {
     private void goHome() {
         view.finishPoly();
         saveDraft();
-        saveThumb();
+        saveThumb(() -> home.refreshCards());
         editorShown = false;
         editor.setVisibility(View.GONE);
         home.setVisibility(View.VISIBLE);
@@ -476,13 +477,13 @@ public final class MainActivity extends Activity implements PageView.Listener {
                 addLineStyle(s); sep(); addColors(s); sep(); addSizes(t, s);
                 break;
             case Tools.HL:
-                addColors(s); sep(); addSizes(t, s); sep();
+                addColors(s); sep(); addSizes(t, s); sep(); addOpacity(s); sep();
                 addToggle("Straight", s.type == 1, v -> { s.type = s.type == 1 ? 0 : 1; toolChanged(); });
                 break;
             case Tools.ERASER:
                 addSizes(t, s); sep();
                 addToggle("Whole stroke", s.erase == 0, v -> { s.erase = 0; toolChanged(); });
-                addToggle("Partial · soon", false, v -> toast("Partial erasing comes in a later update. For now a touch removes the whole markup."));
+                addToggle("Partial", s.erase == 1, v -> { s.erase = 1; toolChanged(); });
                 break;
             case Tools.TEXT: case Tools.NOTE:
                 addColors(s); sep(); addSizes(t, s); sep();
@@ -526,21 +527,108 @@ public final class MainActivity extends Activity implements PageView.Listener {
 
     private void addSizes(int t, Tools.S s) {
         String[] names = {"Fine", "Medium", "Thick"};
+        boolean mm = Tools.hasWidth(t);
         for (int i = 0; i < 3; i++) {
             final int k = i;
             U.Swatch w = swatch(U.Swatch.SIZE);
             w.dot = Tools.sizeDot(t, i);
-            w.on = s.size == i;
+            w.on = s.size == i && (!mm || Math.abs(s.width - s.mm[i]) < 0.001f);
             w.color = t == Tools.HL ? U.parse(s.color(), 0) : 0;
-            w.setContentDescription(names[i]);
-            w.setOnClickListener(v -> { s.size = k; toolChanged(); });
+            w.setContentDescription(mm ? names[i] + " " + Tools.mmText(s.mm[i]) + " (long-press to store the current width)" : names[i]);
+            w.setOnClickListener(v -> { s.size = k; if (mm) s.width = s.mm[k]; toolChanged(); });
+            if (mm) w.setOnLongClickListener(v -> {
+                s.mm[k] = s.width; s.size = k;
+                toast(names[k] + " is now " + Tools.mmText(s.width));
+                toolChanged();
+                return true;
+            });
         }
-        String lab = Tools.sizeLabel(t, s.size, unit());
-        if (!lab.isEmpty()) {
-            TextView l = U.text(this, lab, 12, U.MUTED, false);
-            l.setPadding(px(4), 0, px(2), 0);
-            row2.addView(l);
-        }
+        String lab = Tools.sizeLabel(t, s, unit());
+        if (lab.isEmpty()) return;
+        TextView l = U.text(this, lab, 13, mm ? U.INK : U.MUTED, mm);
+        l.setGravity(Gravity.CENTER);
+        l.setPadding(px(10), 0, px(10), 0);
+        if (mm) {
+            l.setBackground(U.round(U.ACTIVE, 12));
+            l.setContentDescription("Line width " + lab + " - tap for the slider");
+            l.setOnClickListener(v -> widthPopover(l, t, s));
+            row2.addView(l, U.lp(ViewGroup.LayoutParams.WRAP_CONTENT, px(38), px(4), 0, px(2), 0));
+        } else row2.addView(l);
+    }
+
+    /** Exact width: slider (squared scale = fine steps at the thin end) and -/+ steps. */
+    private void widthPopover(View anchorV, int t, Tools.S s) {
+        LinearLayout c = new LinearLayout(this);
+        c.setOrientation(LinearLayout.VERTICAL);
+        c.setPadding(px(16), px(14), px(16), px(12));
+        U.card(c, 16, 8);
+        LinearLayout head = new LinearLayout(this);
+        head.setGravity(Gravity.CENTER_VERTICAL);
+        head.addView(U.text(this, "Line width on paper", 14, U.INK, true), new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+        TextView val = U.text(this, Tools.mmText(s.width), 14, U.BLUE, true);
+        head.addView(val);
+        c.addView(head);
+        LinearLayout row = new LinearLayout(this);
+        row.setGravity(Gravity.CENTER_VERTICAL);
+        TextView minus = U.text(this, "−", 20, U.INK, true), plus = U.text(this, "+", 20, U.INK, true);
+        for (TextView b : new TextView[]{minus, plus}) { b.setGravity(Gravity.CENTER); b.setBackground(U.round(U.ACTIVE, 10)); }
+        SeekBar sb = new SeekBar(this);
+        sb.setMax(1000);
+        sb.setProgress(Tools.toSlider(t, s.width));
+        row.addView(minus, U.lp(px(40), px(40)));
+        row.addView(sb, new LinearLayout.LayoutParams(0, px(44), 1));
+        row.addView(plus, U.lp(px(40), px(40)));
+        c.addView(row, U.lp(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT, 0, px(8), 0, 0));
+        final Runnable[] apply = new Runnable[1];
+        apply[0] = () -> {
+            val.setText(Tools.mmText(s.width));
+            tools.save(tools.current);
+            tools.apply(view);
+            view.invalidate();
+        };
+        sb.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
+            @Override public void onProgressChanged(SeekBar b, int p, boolean user) { if (user) { s.width = Tools.fromSlider(t, p); apply[0].run(); } }
+            @Override public void onStartTrackingTouch(SeekBar b) { }
+            @Override public void onStopTrackingTouch(SeekBar b) { }
+        });
+        View.OnClickListener step = v -> {
+            float d = s.width < 0.5f ? 0.01f : s.width < 1f ? 0.05f : s.width < 5f ? 0.1f : 0.5f;
+            float nw = s.width + (v == plus ? d : -d);
+            nw = Math.max(Tools.minMm(t), Math.min(Tools.maxMm(t), Math.round(nw / d) * d));
+            s.width = Math.round(nw * 100) / 100f;
+            sb.setProgress(Tools.toSlider(t, s.width));
+            apply[0].run();
+        };
+        minus.setOnClickListener(step);
+        plus.setOnClickListener(step);
+        TextView hint = U.text(this, "Long-press Fine / Medium / Thick to keep this width as that preset.", 12, U.MUTED, false);
+        hint.setSingleLine(false);
+        hint.setPadding(0, px(6), 0, 0);
+        c.addView(hint);
+        PopupWindow w = new PopupWindow(c, px(320), ViewGroup.LayoutParams.WRAP_CONTENT, true);
+        w.setBackgroundDrawable(new ColorDrawable(Color.TRANSPARENT));
+        w.setOutsideTouchable(true);
+        w.setElevation(px(8));
+        w.setOnDismissListener(this::buildRow2);
+        w.showAsDropDown(anchorV, 0, px(14));
+    }
+
+    /** Highlighter opacity, inline in row 2. */
+    private void addOpacity(Tools.S s) {
+        TextView l = U.text(this, s.opacity + "%", 13, U.INK, true);
+        l.setGravity(Gravity.CENTER);
+        SeekBar sb = new SeekBar(this);
+        sb.setMax(80);   // 10..90 %
+        sb.setProgress(s.opacity - 10);
+        sb.setContentDescription("Highlighter opacity");
+        sb.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
+            @Override public void onProgressChanged(SeekBar b, int p, boolean user) { s.opacity = 10 + p; l.setText(s.opacity + "%"); view.hlOpacity = s.opacity; }
+            @Override public void onStartTrackingTouch(SeekBar b) { }
+            @Override public void onStopTrackingTouch(SeekBar b) { tools.save(tools.current); }
+        });
+        row2.addView(U.text(this, "Opacity", 12, U.MUTED, false));
+        row2.addView(sb, U.lp(px(120), px(40)));
+        row2.addView(l, U.lp(px(40), px(40)));
     }
 
     private U.Swatch swatch(int kind) {
@@ -640,12 +728,29 @@ public final class MainActivity extends Activity implements PageView.Listener {
     private void styleSel(String color, int size) {
         Mk sel = view.sel;
         if (sel == null) return;
-        String c0 = view.color; int s0 = view.sizeIdx;
+        String c0 = view.color; int s0 = view.sizeIdx; float w0 = view.widthMm;
         view.color = color != null ? color : sel.color;
         view.sizeIdx = size >= 0 ? size : sel.size;
+        int t = toolOf(sel);
+        view.widthMm = size >= 0 && Tools.hasWidth(t) ? tools.s[t].mm[size] : -1;   // -1: keep the width
+        if (view.widthMm < 0 && sel.k != Mk.TEXT) {   // colour only: keep exact width
+            view.widthMm = (float) Mk.ptToMm(sel.w);
+            view.sizeIdx = sel.size;
+        }
         view.styleSelected();
-        view.color = c0; view.sizeIdx = s0;
+        view.color = c0; view.sizeIdx = s0; view.widthMm = w0;
         buildRow2();
+    }
+
+    /** The tool whose width presets fit a markup. */
+    private static int toolOf(Mk m) {
+        switch (m.k) {
+            case Mk.HIGHLIGHT: return Tools.HL;
+            case Mk.TEXT: return Tools.TEXT;
+            case Mk.CLOUD: return Tools.CLOUD;
+            case Mk.BOX: case Mk.ELLIPSE: case Mk.ARROW: return Tools.SHAPES;
+            default: return (m.flags & Mk.FINE) != 0 ? Tools.FINE : (m.flags & Mk.PENCIL) != 0 ? Tools.PENCIL : Tools.PEN;
+        }
     }
 
     interface ColorPick { void pick(String c); }
@@ -702,13 +807,20 @@ public final class MainActivity extends Activity implements PageView.Listener {
                 TextView l = U.text(this, Tools.LINE_NAMES[st], 13, U.INK, false);
                 l.setPadding(0, px(4), 0, 0);
                 tile.addView(l);
-                tile.setOnClickListener(v -> { s.line = st; tools.save(tools.current); pw[0].dismiss(); buildRow2(); });
+                boolean noVar = st == Tools.LINE_VARIABLE && !(tools.current == Tools.PEN || tools.current == Tools.PENCIL);
+                if (noVar) tile.setAlpha(0.35f);
+                tile.setOnClickListener(v -> {
+                    if (noVar) { toast(tools.current == Tools.FINE ? "The fineliner keeps a constant width - use Pen or Pencil for pressure lines."
+                            : "Shapes are drawn with a constant width."); return; }
+                    s.line = st; tools.save(tools.current); tools.apply(view); pw[0].dismiss(); buildRow2();
+                });
                 LinearLayout.LayoutParams p = new LinearLayout.LayoutParams(0, px(64), 1);
                 p.setMargins(k == 0 ? 0 : px(5), r == 0 ? 0 : px(10), k == 0 ? px(5) : 0, 0);
                 row.addView(tile, p);
             }
             c.addView(row, U.lp(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
         }
+        if (!Tools.penLike(tools.current)) { showPopover(c, anchorV, pw); return; }
         c.addView(U.divider(this, false, U.LINE), U.lp(ViewGroup.LayoutParams.MATCH_PARENT, px(1), 0, px(14), 0, px(12)));
         LinearLayout sh = new LinearLayout(this);
         sh.addView(U.text(this, "Stabilization", 14, U.INK, true), new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
@@ -721,7 +833,7 @@ public final class MainActivity extends Activity implements PageView.Listener {
         sb.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
             @Override public void onProgressChanged(SeekBar b, int p, boolean user) { s.stab = p / 10f; sv.setText(String.format(Locale.US, "%.1f", s.stab)); }
             @Override public void onStartTrackingTouch(SeekBar b) { }
-            @Override public void onStopTrackingTouch(SeekBar b) { tools.save(tools.current); }
+            @Override public void onStopTrackingTouch(SeekBar b) { tools.save(tools.current); tools.apply(view); }
         });
         c.addView(sb, U.lp(ViewGroup.LayoutParams.MATCH_PARENT, px(40)));
         Switch snap = new Switch(this);
@@ -729,13 +841,15 @@ public final class MainActivity extends Activity implements PageView.Listener {
         snap.setTextSize(14);
         snap.setTextColor(U.INK);
         snap.setChecked(s.snap);
-        snap.setOnCheckedChangeListener((b, on) -> { s.snap = on; tools.save(tools.current); });
+        snap.setOnCheckedChangeListener((b, on) -> { s.snap = on; tools.save(tools.current); tools.apply(view); });
         c.addView(snap, U.lp(ViewGroup.LayoutParams.MATCH_PARENT, px(44)));
-        TextView note = U.text(this, "Fixed lines are drawn today. Variable, dashed and dotted lines, stabilization and "
-                + "snapping are kept with this tool and start working in the next update.", 12, U.MUTED, false);
+        TextView note = U.text(this, "Hold the pen still at the end of a stroke to turn it into a line, rectangle or ellipse.", 12, U.MUTED, false);
         note.setSingleLine(false);
-        note.setPadding(0, px(6), 0, 0);
         c.addView(note);
+        showPopover(c, anchorV, pw);
+    }
+
+    private void showPopover(LinearLayout c, View anchorV, PopupWindow[] pw) {
         PopupWindow w = new PopupWindow(c, px(300), ViewGroup.LayoutParams.WRAP_CONTENT, true);
         w.setBackgroundDrawable(new ColorDrawable(Color.TRANSPARENT));
         w.setOutsideTouchable(true);
@@ -952,6 +1066,8 @@ public final class MainActivity extends Activity implements PageView.Listener {
         CharSequence[] items = {
                 "Your name on comments:  " + (name.isEmpty() ? "not set" : name),
                 "Draw with finger too:  " + (view.fingerDraw ? "On" : "Off (only the pen draws)"),
+                "Move the sheet with two fingers only:  " + (view.twoFingerPan ? "On" : "Off (one finger moves it)"),
+                "Accounts shown on home…",
                 "Diagnostics (why the app left the screen)",
                 "About & licences"};
         new AlertDialog.Builder(this).setTitle("Settings").setItems(items, (d, w) -> {
@@ -962,7 +1078,13 @@ public final class MainActivity extends Activity implements PageView.Listener {
                     prefs.edit().putBoolean("fingerDraw", view.fingerDraw).apply();
                     settings();
                     break;
-                case 2: diagnostics(); break;
+                case 2:
+                    view.twoFingerPan = !view.twoFingerPan;
+                    prefs.edit().putBoolean("twoFingerPan", view.twoFingerPan).apply();
+                    settings();
+                    break;
+                case 3: accountsShown(); break;
+                case 4: diagnostics(); break;
                 default: about();
             }
         }).setNegativeButton("Close", null).show();
@@ -1026,6 +1148,69 @@ public final class MainActivity extends Activity implements PageView.Listener {
         prefs.edit().putString("trees", b.toString()).apply();
     }
 
+    // files opened from cloud accounts (one per provider + account): they appear under ACCOUNTS
+    private List<Uri> seen() {
+        List<Uri> l = new ArrayList<>();
+        for (String s : prefs.getString("seen", "").split("\n")) if (!s.isEmpty()) l.add(Uri.parse(s));
+        return l;
+    }
+
+    private void storeList(String key, List<Uri> l) {
+        StringBuilder b = new StringBuilder();
+        for (Uri u : l) b.append(u).append('\n');
+        prefs.edit().putString(key, b.toString()).apply();
+    }
+
+    private void rememberSeen(Uri file) {
+        if (file == null || HomeView.isTablet(file.getAuthority()) || "Files".equals(HomeView.provider(file.getAuthority()))) return;
+        List<Uri> l = seen();
+        String acc = HomeView.account(file);
+        for (int i = l.size() - 1; i >= 0; i--)
+            if (String.valueOf(l.get(i).getAuthority()).equals(file.getAuthority()) && HomeView.account(l.get(i)).equals(acc)) l.remove(i);
+        l.add(file);
+        storeList("seen", l);
+        Diag.log("account seen: " + HomeView.provider(file.getAuthority()) + (acc.isEmpty() ? "" : " acc " + acc));
+    }
+
+    private java.util.Set<String> hiddenSet() {
+        java.util.Set<String> h = new java.util.HashSet<>();
+        for (String s : prefs.getString("hidden", "").split("\n")) if (!s.isEmpty()) h.add(s);
+        return h;
+    }
+
+    /** Settings: tick boxes per provider and per entry (hidden entries stay linked). */
+    private void accountsShown() {
+        List<String> keys = new ArrayList<>(), labels = new ArrayList<>();
+        for (String prov : HomeView.PROVIDERS) {
+            List<String> k2 = new ArrayList<>(), l2 = new ArrayList<>();
+            for (Uri t : linked()) if (!HomeView.isTablet(t.getAuthority()) && prov.equals(HomeView.provider(t.getAuthority()))) {
+                String acc = HomeView.account(t);
+                String n = HomeView.name(getContentResolver(), DocumentsContract.buildDocumentUriUsingTree(t, DocumentsContract.getTreeDocumentId(t)));
+                k2.add(t.toString()); l2.add("      " + (n == null ? "Folder" : n) + (acc.isEmpty() ? "" : " · account " + acc));
+            }
+            for (Uri f : seen()) if (prov.equals(HomeView.provider(f.getAuthority()))) {
+                String acc = HomeView.account(f);
+                k2.add(f.toString()); l2.add("      " + (acc.isEmpty() ? prov : "Account " + acc) + " · browse");
+            }
+            if (k2.isEmpty()) continue;
+            keys.add("prov:" + prov); labels.add(prov + " (all)");
+            keys.addAll(k2); labels.addAll(l2);
+        }
+        if (keys.isEmpty()) { toast("No accounts yet. Open a file or add a folder with “Browse Drive / OneDrive”."); return; }
+        java.util.Set<String> hid = hiddenSet();
+        boolean[] on = new boolean[keys.size()];
+        for (int i = 0; i < on.length; i++) on[i] = !hid.contains(keys.get(i));
+        new AlertDialog.Builder(this).setTitle("Accounts shown on home")
+                .setMultiChoiceItems(labels.toArray(new CharSequence[0]), on, (d, w, c) -> on[w] = c)
+                .setPositiveButton("OK", (d, w) -> {
+                    StringBuilder b = new StringBuilder();
+                    for (int i = 0; i < on.length; i++) if (!on[i]) b.append(keys.get(i)).append('\n');
+                    prefs.edit().putString("hidden", b.toString()).apply();
+                    home.refresh();
+                })
+                .setNegativeButton("Cancel", null).show();
+    }
+
     private void link(Uri tree) {
         List<Uri> l = linked();
         if (!l.contains(tree)) l.add(tree);
@@ -1055,14 +1240,23 @@ public final class MainActivity extends Activity implements PageView.Listener {
             final String folder = r.folder.isEmpty() ? null : r.folder;
             confirmDiscard(() -> open(u, tree, folder, false, r.where));
         }
-        @Override public void onAddAccount() {
-            new AlertDialog.Builder(MainActivity.this).setTitle("Add account")
-                    .setMessage("In the next screen open the menu (☰), choose OneDrive or Google Drive, go to your project "
-                            + "folder and tap “Use this folder”.\n\nRevMarkup then lists its PDFs here and saves name_comments.pdf "
-                            + "next to each drawing. No password is given to RevMarkup.")
-                    .setPositiveButton("Continue", (d, w) -> pickTree(REQ_TREE, null))
+        @Override public void onBrowse() {
+            new AlertDialog.Builder(MainActivity.this).setTitle("Browse Drive / OneDrive")
+                    .setItems(new CharSequence[]{"Open a PDF…", "Add a project folder to the home screen…"}, (d, w) -> {
+                        toast("Open the menu (☰) in the next screen to choose Google Drive or OneDrive and the account.");
+                        if (w == 0) confirmDiscard(MainActivity.this::pickFile);
+                        else pickTree(REQ_TREE, null);
+                    })
                     .setNegativeButton("Cancel", null).show();
         }
+        @Override public void onBrowseAt(Uri file) { confirmDiscard(() -> pickFileAt(file)); }
+        @Override public List<Uri> seenFiles() { return seen(); }
+        @Override public void forgetSeen(Uri file) {
+            List<Uri> l = seen();
+            l.remove(file);
+            storeList("seen", l);
+        }
+        @Override public boolean hidden(String key) { return hiddenSet().contains(key); }
         @Override public void onLinkTablet() { pickTree(REQ_TREE_TABLET, null); }
         @Override public void onOpenOther() { confirmDiscard(MainActivity.this::pickFile); }
         @Override public void onSettings() { settings(); }
@@ -1144,6 +1338,16 @@ public final class MainActivity extends Activity implements PageView.Listener {
                 .setNegativeButton("Close", null).show();
     }
 
+    private void pickFileAt(Uri at) {
+        Intent i = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+        i.addCategory(Intent.CATEGORY_OPENABLE);
+        i.setType("application/pdf");
+        if (at != null) i.putExtra(DocumentsContract.EXTRA_INITIAL_URI, at);
+        i.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+                | Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION);
+        startActivityForResult(i, REQ_OPEN);
+    }
+
     private void pickFile() {
         Intent i = new Intent(Intent.ACTION_OPEN_DOCUMENT);
         i.addCategory(Intent.CATEGORY_OPENABLE);
@@ -1159,7 +1363,7 @@ public final class MainActivity extends Activity implements PageView.Listener {
         if (res != RESULT_OK || data == null || data.getData() == null) { pendingAfterSave = null; return; }
         Uri u = data.getData();
         keepPermission(u, data.getFlags());
-        if (req == REQ_OPEN) open(u, null, null, true, HomeView.provider(u.getAuthority()));
+        if (req == REQ_OPEN) { rememberSeen(u); open(u, null, null, true, HomeView.provider(u.getAuthority())); }
         else if (req == REQ_SAVE) { outUri = u; doSave(u, true); }
         else {
             try { getContentResolver().takePersistableUriPermission(u,
@@ -1200,6 +1404,7 @@ public final class MainActivity extends Activity implements PageView.Listener {
         final File tmp = new File(work.getParentFile(), "incoming.pdf");
         final PdfDoc[] out = new PdfDoc[1];
         final String[] nm = new String[1];
+        final long[] size = {-1};
         final PdfDoc old = doc;
         saveThumb();
         doc = null;
@@ -1207,6 +1412,9 @@ public final class MainActivity extends Activity implements PageView.Listener {
         Toast.makeText(this, "Opening…", Toast.LENGTH_SHORT).show();
         worker.job(() -> {
             nm[0] = displayName(u);
+            try (Cursor c = cr.query(u, new String[]{OpenableColumns.SIZE}, null, null, null)) {
+                if (c != null && c.moveToFirst() && !c.isNull(0)) size[0] = c.getLong(0);
+            } catch (Exception ignored) { }
             try (InputStream in = cr.openInputStream(u); OutputStream o = new FileOutputStream(tmp)) {
                 if (in == null) throw new Exception("The file could not be read.");
                 byte[] buf = new byte[1 << 16];
@@ -1236,12 +1444,15 @@ public final class MainActivity extends Activity implements PageView.Listener {
             outUri = name.toLowerCase(Locale.ROOT).endsWith("_comments.pdf") && (fromPicker || tree != null) ? u : null;
             Recents.Item r = recents.touch(u.toString());
             r.name = name; r.tree = tree == null ? "" : tree.toString(); r.folder = folder == null ? "" : folder; r.where = where;
+            if (size[0] < 0) size[0] = work.length();
+            r.size = size[0];
             if (r.page >= doc.pages()) r.page = 0;
             int startPage = r.page;
             view.setDoc(doc, doc.loaded, startPage);
             if (doc.keptForeign > 0)
                 toast(doc.keptForeign + " desktop-only markup(s) (pins, symbols, images, filled shapes, callouts) are kept in the PDF but can't be edited here.");
             saveDraft();
+            handler.postDelayed(() -> saveThumb(), 2500);   // card picture even if the user never goes back home
             Diag.log("opened " + name);
             showEditor();
             tools.apply(view);
@@ -1440,20 +1651,36 @@ public final class MainActivity extends Activity implements PageView.Listener {
         recents.save();
     }
 
-    private void saveThumb() {
+    private void saveThumb() { saveThumb(null); }
+
+    /** Card picture: from the sheet on screen, or drawn small by PDFium when it was trimmed from the cache. */
+    private void saveThumb(Runnable done) {
         if (doc == null || srcUri == null) return;
         Recents.Item r = recents.find(srcUri.toString());
         if (r == null) return;
-        final Bitmap b = view.thumb(240);
-        if (b == null) return;
         final File f = recents.thumb(r);
-        bg.execute(() -> {
-            File tmp = new File(f.getPath() + ".tmp");
-            try (OutputStream o = new FileOutputStream(tmp)) { b.compress(Bitmap.CompressFormat.PNG, 100, o); }
-            catch (Exception e) { return; }
-            //noinspection ResultOfMethodCallIgnored
-            tmp.renameTo(f);
+        final Bitmap b = view.thumb(240);
+        final PdfDoc d = doc; final int pg = view.page;
+        if (b != null) { bg.execute(() -> { writeThumb(b, f); if (done != null) handler.post(done); }); return; }
+        final Bitmap[] out = new Bitmap[1];
+        worker.job(() -> {
+            if (d.closed) return;
+            float sc = 240f / Math.max(1f, d.pw(pg));
+            Bitmap t = Bitmap.createBitmap(240, Math.max(1, Math.round(d.ph(pg) * sc)), Bitmap.Config.ARGB_8888);
+            t.eraseColor(Color.WHITE);
+            if (Pdfium.nRender(d.h, pg, t, sc, 0, 0) == 1) out[0] = t; else t.recycle();
+        }, err -> {
+            if (out[0] == null) return;
+            bg.execute(() -> { writeThumb(out[0], f); if (done != null) handler.post(done); });
         });
+    }
+
+    private static void writeThumb(Bitmap b, File f) {
+        File tmp = new File(f.getPath() + ".tmp");
+        try (OutputStream o = new FileOutputStream(tmp)) { b.compress(Bitmap.CompressFormat.PNG, 100, o); }
+        catch (Exception e) { return; }
+        //noinspection ResultOfMethodCallIgnored
+        tmp.renameTo(f);
     }
 
     private void restoreDraft(Runnable then) {

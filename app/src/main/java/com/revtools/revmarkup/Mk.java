@@ -24,6 +24,11 @@ final class Mk {
     static final int POLY = 4;      // cloud: freehand outline in P (closed)
     static final int OVAL = 8;      // cloud: elliptical, P0/P1 = bounding box
     static final int ROUND = 16;    // box: rounded corners, radius = min(w,h) * 0.12
+    // v2 line style / pen kind (Flags bits; older readers ignore them and draw a plain line of width W)
+    static final int VAR = 32;      // variable width: factor per point in `pw` (field 17)
+    static final int DASH = 64, DOT = 128;
+    static final int FINE = 256, PENCIL = 512;
+    static final int STYLE_MASK = VAR | DASH | DOT;
 
     int k;
     int page;
@@ -38,6 +43,8 @@ final class Mk {
     int fillA = 30;
     double textW;
     int flags;
+    int opacity = 40;               // highlighter opacity in % (field 17 "op")
+    float[] pw;                     // VAR: width factor per point (field 17 "pw"), else null
 
     static final double[] PEN_W = {1.2, 2.2, 3.6};
     static final double[] HL_W = {8, 14, 22};
@@ -60,7 +67,7 @@ final class Mk {
         Mk m = new Mk();
         m.k = k; m.page = page; m.color = color; m.size = size; m.w = w; m.font = font; m.bump = bump;
         m.seq = seq; m.p = p.clone(); m.text = text; m.heads = heads; m.fill = fill; m.fillA = fillA;
-        m.textW = textW; m.flags = flags;
+        m.textW = textW; m.flags = flags; m.opacity = opacity; m.pw = pw == null ? null : pw.clone();
         return m;
     }
 
@@ -71,6 +78,25 @@ final class Mk {
     }
 
     int argb() { return 0xFF000000 | Integer.parseInt(color.substring(1), 16); }
+
+    static double mmToPt(double mm) { return mm * 72 / 25.4; }
+    static double ptToMm(double pt) { return pt * 25.4 / 72; }
+
+    /** Opacity 0..255 the line is drawn with (highlighter %, pencil slightly see-through). */
+    int alpha() {
+        if (k == HIGHLIGHT) return Math.round(Math.max(5, Math.min(100, opacity)) * 2.55f);
+        if ((flags & PENCIL) != 0) return 0xD8;
+        return 255;
+    }
+
+    boolean variable() { return (flags & VAR) != 0 && pw != null && pw.length == n() && n() >= 2; }
+
+    /** Dash pattern in sheet points (on, off), or null for a solid line. */
+    float[] dash() {
+        if ((flags & DASH) != 0) return new float[]{(float) Math.max(w * 4, mmToPt(2.5)), (float) Math.max(w * 2.5, mmToPt(1.5))};
+        if ((flags & DOT) != 0) return new float[]{0.01f, (float) Math.max(w * 2.2, mmToPt(0.9))};
+        return null;
+    }
 
     /** Markups this app can draw and edit itself. Others stay inside the PDF untouched. */
     boolean editableHere() {
@@ -96,7 +122,43 @@ final class Mk {
         sb.append('|').append(Base64.getEncoder().encodeToString(text.getBytes(StandardCharsets.UTF_8)));
         sb.append('|').append(heads).append('|').append(fill).append('|').append(fillA)
           .append('|').append(num3(textW)).append('|').append(flags);
+        String ext = ext();
+        if (!ext.isEmpty()) sb.append('|').append(ext);   // field 17: older readers stop at field 16
         return sb.toString();
+    }
+
+    /** Field 17: key=value pairs separated by ';' (op = highlighter opacity %, pw = width factors). */
+    private String ext() {
+        StringBuilder e = new StringBuilder();
+        if (k == HIGHLIGHT && opacity != 40) e.append("op=").append(opacity);
+        if (variable()) {
+            if (e.length() > 0) e.append(';');
+            e.append("pw=");
+            for (int i = 0; i < pw.length; i++) { if (i > 0) e.append(','); e.append(num2(pw[i])); }
+        }
+        return e.toString();
+    }
+
+    private void readExt(String e) {
+        for (String kv : e.split(";")) {
+            int i = kv.indexOf('=');
+            if (i <= 0) continue;
+            String key = kv.substring(0, i), v = kv.substring(i + 1);
+            try {
+                if (key.equals("op")) opacity = Math.max(5, Math.min(100, Integer.parseInt(v)));
+                else if (key.equals("pw")) {
+                    String[] a = v.split(",");
+                    if (a.length != n()) continue;
+                    float[] f = new float[a.length];
+                    for (int j = 0; j < a.length; j++) {
+                        double d = Double.parseDouble(a[j]);
+                        f[j] = (float) (fin(d) ? Math.max(0.05, Math.min(4, d)) : 1);
+                    }
+                    pw = f;
+                }
+            } catch (RuntimeException ignored) { /* unknown or damaged value: keep the default */ }
+        }
+        if (pw == null) flags &= ~VAR;
     }
 
     static Mk parse(String s) {
@@ -133,6 +195,8 @@ final class Mk {
                 m.textW = clamp(f[14], 0, 0, 1e5);
                 m.flags = Integer.parseInt(f[15]);
             }
+            if (f.length >= 17) m.readExt(f[16]);
+            else m.flags &= ~VAR;
             return m;
         } catch (RuntimeException e) {
             return null;
@@ -145,6 +209,11 @@ final class Mk {
 
     private static String num3(double v) {
         String s = new BigDecimal(v).setScale(3, java.math.RoundingMode.HALF_UP).stripTrailingZeros().toPlainString();
+        return s.equals("-0") ? "0" : s;
+    }
+
+    private static String num2(double v) {
+        String s = new BigDecimal(v).setScale(2, java.math.RoundingMode.HALF_UP).stripTrailingZeros().toPlainString();
         return s.equals("-0") ? "0" : s;
     }
 
@@ -303,7 +372,7 @@ final class Mk {
         if (n() > 2) { polyArrow(out); return; }
         float ax = x(0), ay = y(0), bx = x(1), by = y(1);
         double L = Math.max(Math.hypot(bx - ax, by - ay), 1e-6), ux = (bx - ax) / L, uy = (by - ay) / L;
-        double hl = Math.min(w * 5.0, L * (heads == 2 ? 0.4 : 0.6)), hw = hl * 0.55;
+        double hl = Math.min(Math.max(w * 5.0, mmToPt(2.5)), L * (heads == 2 ? 0.4 : 0.6)), hw = hl * 0.55;
         double ex = heads >= 1 ? bx - ux * hl : bx, ey = heads >= 1 ? by - uy * hl : by;
         double sx = heads == 2 ? ax + ux * hl : ax, sy = heads == 2 ? ay + uy * hl : ay;
         out.add(new Sub(new float[]{(float) sx, (float) sy, (float) ex, (float) ey}, false, false));
@@ -317,7 +386,7 @@ final class Mk {
         float ax = x(0), ay = y(0), bx = x(n - 1), by = y(n - 1);
         double le = Math.max(Math.hypot(bx - x(n - 2), by - y(n - 2)), 1e-6), uex = (bx - x(n - 2)) / le, uey = (by - y(n - 2)) / le;
         double ls = Math.max(Math.hypot(x(1) - ax, y(1) - ay), 1e-6), usx = (x(1) - ax) / ls, usy = (y(1) - ay) / ls;
-        double hlE = Math.min(w * 5.0, le * 0.6), hlS = Math.min(w * 5.0, ls * 0.6);
+        double hh = Math.max(w * 5.0, mmToPt(2.5)), hlE = Math.min(hh, le * 0.6), hlS = Math.min(hh, ls * 0.6);
         float[] line = p.clone();
         if (heads == 2) { line[0] = (float) (ax + usx * hlS); line[1] = (float) (ay + usy * hlS); }
         if (heads >= 1) { line[2 * n - 2] = (float) (bx - uex * hlE); line[2 * n - 1] = (float) (by - uey * hlE); }
@@ -376,6 +445,151 @@ final class Mk {
             if (n == 1 && Math.hypot(qx - a[0], qy - a[1]) <= t) return true;
         }
         return false;
+    }
+
+    /** Variable-width stroke as polylines of equal width: {factor, x0, y0, x1, y1, ...} (factor quantized to 0.08). */
+    List<float[]> widthRuns() {
+        List<float[]> out = new ArrayList<>();
+        int n = n();
+        FloatList cur = null; float curF = -1;
+        for (int i = 0; i + 1 < n; i++) {
+            float f = Math.round((pw[i] + pw[i + 1]) / 2 / 0.08f) * 0.08f;
+            if (f < 0.08f) f = 0.08f;
+            if (cur == null || f != curF) {
+                if (cur != null) out.add(withHead(curF, cur.toArray()));
+                cur = new FloatList(); curF = f;
+                cur.add(x(i), y(i));
+            }
+            cur.add(x(i + 1), y(i + 1));
+        }
+        if (cur != null) out.add(withHead(curF, cur.toArray()));
+        return out;
+    }
+
+    private static float[] withHead(float f, float[] pts) {
+        float[] r = new float[pts.length + 1];
+        r[0] = f;
+        System.arraycopy(pts, 0, r, 1, pts.length);
+        return r;
+    }
+
+    /**
+     * Hold-to-snap: a freehand pen stroke as a clean line, rectangle / square or ellipse / circle.
+     * Returns null when the stroke is none of these (it then stays freehand). minSize in sheet points.
+     */
+    Mk snapped(float minSize) {
+        int n = n();
+        if (k != PEN || n < 3) return null;
+        float x0 = Float.MAX_VALUE, y0 = Float.MAX_VALUE, x1 = -Float.MAX_VALUE, y1 = -Float.MAX_VALUE;
+        double len = 0;
+        for (int i = 0; i < n; i++) {
+            x0 = Math.min(x0, x(i)); x1 = Math.max(x1, x(i)); y0 = Math.min(y0, y(i)); y1 = Math.max(y1, y(i));
+            if (i > 0) len += Math.hypot(x(i) - x(i - 1), y(i) - y(i - 1));
+        }
+        float bw = x1 - x0, bh = y1 - y0;
+        if (Math.max(bw, bh) < minSize) return null;
+        double ends = Math.hypot(x(n - 1) - x(0), y(n - 1) - y(0));
+        Mk m = copy();
+        m.pw = null;
+        m.flags &= ~VAR;
+        // 1. straight line: every point close to the chord
+        if (ends > 0.6 * len) {
+            double dev = 0;
+            for (int i = 1; i < n - 1; i++) dev = Math.max(dev, segDist(x(i), y(i), x(0), y(0), x(n - 1), y(n - 1)));
+            if (dev <= Math.max(0.06 * ends, minSize * 0.15)) {
+                m.p = new float[]{x(0), y(0), x(n - 1), y(n - 1)};
+                return m;
+            }
+            return null;
+        }
+        // 2. closed shape: the stroke must come back near its start
+        if (ends > 0.25 * Math.max(bw, bh) || Math.min(bw, bh) < minSize * 0.3) return null;
+        float cx = (x0 + x1) / 2, cy = (y0 + y1) / 2, rx = Math.max(bw / 2, 1e-3f), ry = Math.max(bh / 2, 1e-3f);
+        double eErr = 0, rErr = 0;
+        for (int i = 0; i < n; i++) {
+            double dx = (x(i) - cx) / rx, dy = (y(i) - cy) / ry;
+            eErr += Math.abs(Math.hypot(dx, dy) - 1);
+            double edge = Math.min(Math.min(x(i) - x0, x1 - x(i)), Math.min(y(i) - y0, y1 - y(i)));
+            rErr += edge / Math.min(rx, ry);
+        }
+        eErr /= n; rErr /= n;
+        if (Math.min(eErr, rErr) > 0.22) return null;
+        boolean even = Math.abs(bw - bh) / Math.max(bw, bh) < 0.14f;   // nearly square: make it exact
+        if (even) { float r = (bw + bh) / 4; x0 = cx - r; x1 = cx + r; y0 = cy - r; y1 = cy + r; }
+        m.k = rErr < eErr ? BOX : ELLIPSE;
+        m.flags &= ~(FINE | PENCIL);
+        m.p = new float[]{x0, y0, x1, y1};
+        return m;
+    }
+
+    /** Can the partial eraser cut this markup (pen / highlighter strokes)? */
+    boolean cuttable() { return (k == PEN || k == HIGHLIGHT) && n() >= 2; }
+
+    /**
+     * Partial eraser: the parts of this stroke outside a circle (x, y, r), as new strokes.
+     * Returns null when the circle does not touch the stroke; an empty list when nothing is left.
+     */
+    List<Mk> cut(float x, float y, float r) {
+        float reach = (float) (r + w / 2);
+        boolean any = false;
+        for (int i = 0; i + 1 < n(); i++)
+            if (segDist(x, y, x(i), y(i), x(i + 1), y(i + 1)) <= reach) { any = true; break; }
+        if (!any) return null;
+        // densify so the cut follows the eraser closely, then keep the runs of points outside the circle
+        float step = Math.max(reach / 3, 0.05f);
+        FloatList pts = new FloatList(); List<Float> fac = new ArrayList<>();
+        boolean var = variable();
+        for (int i = 0; i + 1 < n(); i++) {
+            float ax = x(i), ay = y(i), bx = x(i + 1), by = y(i + 1);
+            int m = (int) Math.min(2000, Math.max(1, Math.ceil(Math.hypot(bx - ax, by - ay) / step)));
+            for (int j = 0; j < m; j++) {
+                float t = j / (float) m;
+                pts.add(ax + (bx - ax) * t, ay + (by - ay) * t);
+                if (var) fac.add(pw[i] + (pw[i + 1] - pw[i]) * t);
+            }
+        }
+        pts.add(x(n() - 1), y(n() - 1));
+        if (var) fac.add(pw[n() - 1]);
+        float[] a = pts.toArray();
+        List<Mk> out = new ArrayList<>();
+        int start = -1, cnt = a.length / 2;
+        for (int i = 0; i <= cnt; i++) {
+            boolean keep = i < cnt && Math.hypot(a[2 * i] - x, a[2 * i + 1] - y) > reach;
+            if (keep && start < 0) start = i;
+            if (!keep && start >= 0) {
+                if (i - start >= 2) {
+                    Mk m = copy();
+                    m.p = simplify(java.util.Arrays.copyOfRange(a, 2 * start, 2 * i), step * 0.15f);
+                    if (var) {   // factors for the simplified points: nearest densified point
+                        m.pw = new float[m.n()];
+                        int q = start;
+                        for (int j = 0; j < m.n(); j++) {
+                            while (q < i - 1 && (a[2 * q] != m.x(j) || a[2 * q + 1] != m.y(j))) q++;
+                            m.pw[j] = fac.get(q);
+                        }
+                    } else m.pw = null;
+                    m.flags = (k == HIGHLIGHT && (flags & STRAIGHT) != 0 && m.n() > 2) ? flags & ~STRAIGHT : flags;
+                    out.add(m);
+                }
+                start = -1;
+            }
+        }
+        return out;
+    }
+
+    /** Drops points that lie on a straight run (keeps the shape; points are copied, never moved). */
+    private static float[] simplify(float[] a, float tol) {
+        int n = a.length / 2;
+        if (n <= 2) return a;
+        FloatList o = new FloatList();
+        o.add(a[0], a[1]);
+        int last = 0;
+        for (int i = 1; i < n - 1; i++) {
+            float d = segDist(a[2 * i], a[2 * i + 1], a[2 * last], a[2 * last + 1], a[2 * i + 2], a[2 * i + 3]);
+            if (d > tol) { o.add(a[2 * i], a[2 * i + 1]); last = i; }
+        }
+        o.add(a[2 * n - 2], a[2 * n - 1]);
+        return o.toArray();
     }
 
     static float segDist(float px, float py, float ax, float ay, float bx, float by) {

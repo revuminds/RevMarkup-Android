@@ -47,6 +47,13 @@ final class PageView extends View {
     boolean fingerDraw;
     boolean textNoBox;          // new text without a frame (Text tool; Comment note keeps the frame)
     float eraserDp = 8;         // eraser reach on screen
+    float widthMm = -1;         // line width in paper mm for new markups (-1: size preset of the sheet)
+    int penFlags;               // Mk.VAR / DASH / DOT / FINE / PENCIL for new lines
+    float stab;                 // stabilization 0..1 (freehand pen)
+    boolean snap;               // hold the pen still at the end of a stroke = clean shape
+    int hlOpacity = 40;         // new highlighter opacity %
+    boolean partialErase;       // eraser cuts pen strokes instead of removing them
+    boolean twoFingerPan = true;// one finger never moves the sheet (a resting wrist can't pan)
     Mk sel;
 
     // view transform: screen = pt * scale + t
@@ -81,6 +88,7 @@ final class PageView extends View {
     private final Paint stroke = new Paint(Paint.ANTI_ALIAS_FLAG), fillP = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Paint ui = new Paint(Paint.ANTI_ALIAS_FLAG), textP = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Map<Mk, Path[]> pathCache = new IdentityHashMap<>();
+    private final Map<Mk, float[]> runW = new IdentityHashMap<>();
     private final float dp;
 
     PageView(Context c, PdfWorker worker) {
@@ -153,6 +161,7 @@ final class PageView extends View {
         marks = new ArrayList<>(loaded);
         undo.clear(); redo.clear();
         pathCache.clear();
+        runW.clear();
         dirty = false;
         sel = null;
         page = d == null ? 0 : Math.max(0, Math.min(startPage, d.pages() - 1));
@@ -308,7 +317,12 @@ final class PageView extends View {
     }
 
     private void changed() {
-        if (pathCache.size() > marks.size() * 2 + 50) pathCache.keySet().retainAll(new java.util.HashSet<>(marks));
+        if (pathCache.size() > marks.size() * 2 + 50) {
+            java.util.Set<Mk> keep = java.util.Collections.newSetFromMap(new IdentityHashMap<>());
+            keep.addAll(marks);
+            pathCache.keySet().retainAll(keep);
+            runW.keySet().retainAll(keep);
+        }
         invalidate();
         if (listener != null) listener.onMarksChanged();
     }
@@ -387,6 +401,7 @@ final class PageView extends View {
         m.color = color;
         m.size = sizeIdx;
         m.applySize(unit());
+        if (m.k != Mk.TEXT && widthMm > 0) m.w = Mk.mmToPt(widthMm);
         int i = marks.indexOf(sel);
         if (i < 0) return;
         List<Mk> n = new ArrayList<>(marks);
@@ -412,6 +427,10 @@ final class PageView extends View {
         for (Mk o : marks) s = Math.max(s, o.seq);
         m.seq = s + 1;
         m.applySize(unit());
+        if (kind != Mk.TEXT && widthMm > 0) m.w = Mk.mmToPt(widthMm);
+        if (kind == Mk.HIGHLIGHT) m.opacity = hlOpacity;
+        if (kind == Mk.PEN) m.flags |= penFlags;
+        else if (kind == Mk.BOX || kind == Mk.ELLIPSE || kind == Mk.ARROW) m.flags |= penFlags & (Mk.DASH | Mk.DOT);
         return m;
     }
 
@@ -439,7 +458,7 @@ final class PageView extends View {
         // 1. The pen always wins: any pen touch starts drawing, whatever the hand is doing.
         if ((act == MotionEvent.ACTION_DOWN || act == MotionEvent.ACTION_POINTER_DOWN) && isPen(e, ai)) {
             if (mode == DRAW) return true;
-            if (mode == PAN && now - panStartAt < 800) undoPan();   // the palm landed first and moved the sheet
+            if (mode == PAN && now - panStartAt < 1000) { undoPan(); Diag.log("palm: pan undone, pen came down"); }
             startDraw(e, ai);
             return true;
         }
@@ -448,11 +467,12 @@ final class PageView extends View {
             if (act == MotionEvent.ACTION_CANCEL) { cancelDraw(); return true; }
             if (i < 0) return true;
             if (act == MotionEvent.ACTION_MOVE) {
-                for (int h = 0; h < e.getHistorySize(); h++) moveDraw(e.getHistoricalX(i, h), e.getHistoricalY(i, h));
-                moveDraw(e.getX(i), e.getY(i));
+                for (int h = 0; h < e.getHistorySize(); h++)
+                    moveDraw(e.getHistoricalX(i, h), e.getHistoricalY(i, h), e.getHistoricalPressure(i, h));
+                moveDraw(e.getX(i), e.getY(i), e.getPressure(i));
             } else if (act == MotionEvent.ACTION_UP || (act == MotionEvent.ACTION_POINTER_UP && ai == i)) {
                 if ((e.getFlags() & MotionEvent.FLAG_CANCELED) != 0) cancelDraw();
-                else { moveDraw(e.getX(i), e.getY(i)); endDraw(e.getX(i), e.getY(i)); }
+                else { moveDraw(e.getX(i), e.getY(i), e.getPressure(i)); endDraw(e.getX(i), e.getY(i)); }
                 mode = act == MotionEvent.ACTION_UP ? NONE : HAND;   // hand still down: keep ignoring it
                 lastPenAt = now;
             }
@@ -463,7 +483,12 @@ final class PageView extends View {
         boolean penNear = hovering || now - lastPenAt < PEN_GRACE_MS;
         if (act == MotionEvent.ACTION_DOWN) {
             if (fingerDraw && !isPalm(e, 0)) { startDraw(e, 0); return true; }
-            if (penNear || isPalm(e, 0)) { mode = HAND; return true; }
+            if (penNear || isPalm(e, 0)) {
+                mode = HAND;
+                Diag.log("palm: touch ignored (" + (penNear ? hovering ? "pen hovering" : "pen just used" : "large contact "
+                        + Math.round(e.getTouchMajor(0) / dp) + " dp") + ")");
+                return true;
+            }
             startPan(e);
             return true;
         }
@@ -478,8 +503,9 @@ final class PageView extends View {
             return true;
         }
         if (penNear || (act == MotionEvent.ACTION_POINTER_DOWN && isPalm(e, ai))) {
-            if (now - panStartAt < 800) undoPan();
+            if (now - panStartAt < 1000) undoPan();
             mode = HAND;
+            Diag.log("palm: pan stopped (" + (penNear ? "pen near" : "large second contact") + ")");
             return true;
         }
         scaler.onTouchEvent(e);
@@ -488,7 +514,8 @@ final class PageView extends View {
         if (act == MotionEvent.ACTION_MOVE && !scaler.isInProgress()) {
             float x = avgX(e), y = avgY(e);
             if (Math.hypot(x - downX, y - downY) > 12 * dp) panMoved = true;
-            if (panMoved) { tx += x - lastX; ty += y - lastY; clamp(); invalidate(); scheduleTile(); }
+            boolean may = !twoFingerPan || e.getPointerCount() >= 2;
+            if (panMoved && may) { tx += x - lastX; ty += y - lastY; clamp(); invalidate(); scheduleTile(); }
             lastX = x; lastY = y;
         }
         if (act == MotionEvent.ACTION_POINTER_DOWN || act == MotionEvent.ACTION_POINTER_UP) {
@@ -505,14 +532,14 @@ final class PageView extends View {
         return true;
     }
 
-    private static final long PEN_GRACE_MS = 1000;
+    private static final long PEN_GRACE_MS = 1500;
     private long lastPenAt, panStartAt;
     private boolean hovering;
     private float panTx, panTy, panScale;
 
     /** A contact much bigger than a fingertip (side of the hand, wrist). */
     private boolean isPalm(MotionEvent e, int i) {
-        return e.getTouchMajor(i) > 60 * dp || e.getToolMajor(i) > 60 * dp;
+        return e.getTouchMajor(i) > 52 * dp || e.getToolMajor(i) > 52 * dp || e.getSize(i) > 0.42f;
     }
 
     private void undoPan() {
@@ -594,7 +621,12 @@ final class PageView extends View {
             cur.add(x, y);
             preview = newMark(activeTool == PEN ? Mk.PEN : activeTool == HIGHLIGHT ? Mk.HIGHLIGHT : Mk.CLOUD);
             if (activeTool == CLOUD) preview.flags = Mk.POLY;
+            if (activeTool != PEN) preview.flags &= ~Mk.VAR;
             preview.p = cur.toArray();
+            smX = x; smY = y; snapped = false;
+            pres = (preview.flags & Mk.VAR) != 0 ? new ArrayList<>() : null;
+            if (pres != null) { pf = pressureFactor(e.getPressure(i)); pres.add(pf); preview.pw = toArr(pres); }
+            snapAnchorX = e.getX(i); snapAnchorY = e.getY(i);
         } else if (activeTool == SELECT) {
             Mk h = topHit(x, y, 14 * dp);
             tapSameText = h != null && h == sel && h.k == Mk.TEXT;   // tap again on selected text = edit
@@ -604,7 +636,7 @@ final class PageView extends View {
         invalidate();
     }
 
-    private void moveDraw(float sx, float sy) {
+    private void moveDraw(float sx, float sy, float pressure) {
         float x = px(sx), y = py(sy);
         if (poly != null && multi(activeTool)) {
             if (polyTap) return;
@@ -614,11 +646,24 @@ final class PageView extends View {
             return;
         }
         if (freehand(activeTool)) {
+            if (snapped) return;   // shape is set; lifting the pen keeps it
+            if (snap && activeTool == PEN && Math.hypot(sx - snapAnchorX, sy - snapAnchorY) > 3 * dp) {
+                snapAnchorX = sx; snapAnchorY = sy;   // still moving: start the hold timer again
+                removeCallbacks(snapTask);
+                postDelayed(snapTask, SNAP_HOLD_MS);
+            }
+            if (stab > 0) {   // stabilization: the line follows the pen with a little lag
+                float a = 1 - stab * 0.88f;
+                smX += (x - smX) * a; smY += (y - smY) * a;
+                x = smX; y = smY;
+            }
+            if (pres != null) pf += (pressureFactor(pressure) - pf) * 0.35f;
             float[] a = cur.a; int n = cur.n;
             float min = 0.6f / scale;   // ~0.6 screen px
             if (Math.abs(a[n - 2] - x) < min && Math.abs(a[n - 1] - y) < min) return;
             cur.add(x, y);
             preview.p = cur.toArray();
+            if (pres != null) { pres.add(pf); preview.pw = toArr(pres); }
             pathCache.remove(preview);
         } else if (shapeTool(activeTool)) {
             if (preview == null) {
@@ -628,9 +673,10 @@ final class PageView extends View {
                         : t == CLOUD ? Mk.CLOUD : Mk.ARROW;
                 preview = newMark(kind);
                 if (t == LINE) preview.heads = 0;
-                if (t == HIGHLIGHT) preview.flags = Mk.STRAIGHT;
-                if (t == BOX && v == 1) preview.flags = Mk.ROUND;
-                if (t == CLOUD && v == 1) preview.flags = Mk.OVAL;
+                preview.flags &= ~Mk.VAR;
+                if (t == HIGHLIGHT) preview.flags |= Mk.STRAIGHT;
+                if (t == BOX && v == 1) preview.flags |= Mk.ROUND;
+                if (t == CLOUD && v == 1) preview.flags |= Mk.OVAL;
             }
             float ex = x, ey = y;
             if (activeTool == ELLIPSE && variant[ELLIPSE] == 1) {   // perfect circle
@@ -649,8 +695,18 @@ final class PageView extends View {
         float x = px(sx), y = py(sy);
         Mk done = null;
         if (poly != null || polyTap) { invalidate(); return; }   // multi-point line: keeps going until its last point is tapped
+        removeCallbacks(snapTask);
         if (freehand(activeTool)) {
+            if (!snapped && preview != null && stab > 0 && cur != null) {   // catch up with where the pen was lifted
+                float[] a = cur.a; int n = cur.n;
+                if (Math.hypot(a[n - 2] - x, a[n - 1] - y) * scale > 0.6f) {
+                    cur.add(x, y);
+                    preview.p = cur.toArray();
+                    if (pres != null) { pres.add(pf); preview.pw = toArr(pres); }
+                }
+            }
             done = preview;
+            if (done != null && done.pw != null && done.pw.length != done.n()) { done.pw = null; done.flags &= ~Mk.VAR; }
             if (done != null && done.k == Mk.CLOUD) {   // a freehand cloud needs a real outline
                 android.graphics.RectF b = new android.graphics.RectF(done.p[0], done.p[1], done.p[0], done.p[1]);
                 for (int k = 0; k < done.p.length; k += 2) b.union(done.p[k], done.p[k + 1]);
@@ -676,7 +732,7 @@ final class PageView extends View {
             }
         }
         if (activeTool == ERASER && erased != null) { commit(erased); erased = null; }
-        preview = null; cur = null; moving = false; moveDx = moveDy = 0;
+        preview = null; cur = null; pres = null; snapped = false; moving = false; moveDx = moveDy = 0;
         if (done != null) {
             done.p = done.p.clone();
             List<Mk> n = new ArrayList<>(marks);
@@ -686,6 +742,35 @@ final class PageView extends View {
         invalidate();
     }
 
+    private static final long SNAP_HOLD_MS = 550;
+    private float smX, smY, pf = 1, snapAnchorX, snapAnchorY;
+    private List<Float> pres;           // width factor per point of the stroke being drawn (Variable)
+    private boolean snapped;
+    private final Runnable snapTask = this::doSnap;
+
+    private void doSnap() {
+        if (mode != DRAW || preview == null || snapped || activeTool != PEN || !snap) return;
+        Mk s2 = preview.snapped(10 * dp / scale);
+        if (s2 == null) return;
+        preview = s2;
+        snapped = true;
+        performHapticFeedback(android.view.HapticFeedbackConstants.LONG_PRESS);
+        Diag.log("snap: " + (s2.k == Mk.BOX ? "rectangle" : s2.k == Mk.ELLIPSE ? "ellipse" : "line"));
+        invalidate();
+    }
+
+    /** Pen pressure 0..1 -> width factor (light touch thin, firm press thick). */
+    private static float pressureFactor(float p) {
+        if (Float.isNaN(p) || p <= 0) p = 0.5f;
+        return Math.max(0.3f, Math.min(1.5f, 0.35f + 1.15f * (float) Math.pow(Math.min(1f, p), 0.8)));
+    }
+
+    private static float[] toArr(List<Float> l) {
+        float[] a = new float[l.size()];
+        for (int i = 0; i < a.length; i++) a[i] = l.get(i);
+        return a;
+    }
+
     private boolean tapSameText;
     private List<Mk> erased;   // list being erased in this stroke (one undo step)
 
@@ -693,6 +778,30 @@ final class PageView extends View {
         Mk h = null;
         List<Mk> src = erased != null ? erased : marks;
         float tol = eraserDp * dp / scale;
+        if (partialErase) {   // cut every pen stroke under the eraser; other markups go as a whole
+            boolean changed = false;
+            List<Mk> next = new ArrayList<>(src.size() + 4);
+            for (Mk m : src) {
+                if (m.page != page || !m.cuttable()) { next.add(m); continue; }
+                List<Mk> parts = m.cut(x, y, tol);
+                if (parts == null) { next.add(m); continue; }
+                next.addAll(parts);
+                changed = true;
+                if (m == sel) setSel(null);
+            }
+            if (changed) { erased = next; invalidate(); return; }
+            src = erased != null ? erased : marks;
+            for (int i = src.size() - 1; i >= 0; i--) {
+                Mk m = src.get(i);
+                if (m.page == page && !m.cuttable() && m.hit(x, y, tol)) { h = m; break; }
+            }
+            if (h == null) return;
+            if (erased == null) erased = new ArrayList<>(marks);
+            erased.remove(h);
+            if (h == sel) setSel(null);
+            invalidate();
+            return;
+        }
         for (int i = src.size() - 1; i >= 0; i--) {
             Mk m = src.get(i);
             if (m.page == page && m.hit(x, y, tol)) { h = m; break; }
@@ -705,6 +814,8 @@ final class PageView extends View {
     }
 
     private void cancelDraw() {
+        removeCallbacks(snapTask);
+        snapped = false; pres = null;
         preview = null; cur = null; moving = false; erased = null; mode = NONE;
         invalidate();
     }
@@ -781,7 +892,8 @@ final class PageView extends View {
             ui.setPathEffect(null);
         }
         if (hoverX >= 0 && mode != DRAW) {
-            float r = tool == ERASER ? eraserDp * dp : Math.max(2 * dp, (float) ((tool == HIGHLIGHT ? Mk.HL_W : Mk.PEN_W)[sizeIdx] * unit() * scale / 2));
+            double wPt = widthMm > 0 ? Mk.mmToPt(widthMm) : (tool == HIGHLIGHT ? Mk.HL_W : Mk.PEN_W)[sizeIdx] * unit();
+            float r = tool == ERASER ? eraserDp * dp : Math.max(2 * dp, (float) (wPt * scale / 2));
             ui.setStyle(Paint.Style.STROKE);
             ui.setStrokeWidth(1 * dp);
             ui.setColor(0x99000000);
@@ -811,21 +923,55 @@ final class PageView extends View {
         }
         Path[] p = pathCache.get(m);
         if (p == null) {
-            p = new Path[]{new Path(), new Path()};
-            for (Mk.Sub s : m.build()) {
-                Path t = s.fill ? p[1] : p[0];
-                t.moveTo(s.pts[0], s.pts[1]);
-                for (int i = 2; i < s.pts.length; i += 2) t.lineTo(s.pts[i], s.pts[i + 1]);
-                if (s.closed) t.close();
+            if (m.variable()) {   // pressure line: one path per width step, widths kept in runW
+                List<float[]> runs = m.widthRuns();
+                p = new Path[2 + runs.size()];
+                p[0] = new Path(); p[1] = new Path();
+                float[] ws = new float[runs.size()];
+                for (int r = 0; r < runs.size(); r++) {
+                    float[] q = runs.get(r);
+                    Path t = new Path();
+                    t.moveTo(q[1], q[2]);
+                    for (int i = 3; i + 1 < q.length; i += 2) t.lineTo(q[i], q[i + 1]);
+                    p[2 + r] = t;
+                    ws[r] = q[0];
+                }
+                runW.put(m, ws);
+            } else {
+                p = new Path[]{new Path(), new Path()};
+                for (Mk.Sub s : m.build()) {
+                    Path t = s.fill ? p[1] : p[0];
+                    t.moveTo(s.pts[0], s.pts[1]);
+                    for (int i = 2; i < s.pts.length; i += 2) t.lineTo(s.pts[i], s.pts[i + 1]);
+                    if (s.closed) t.close();
+                }
             }
             pathCache.put(m, p);
         }
-        boolean hl = m.k == Mk.HIGHLIGHT;
-        stroke.setColor(hl ? (col & 0x00FFFFFF) | (100 << 24) : col);
+        int a = m.alpha();
+        boolean hlDraw = m.k == Mk.HIGHLIGHT;
+        stroke.setColor((col & 0x00FFFFFF) | (a << 24));
         stroke.setStrokeWidth((float) m.w);
-        c.drawPath(p[0], stroke);
+        float[] dash = m.dash();
+        android.graphics.PathEffect fx = dash != null ? new DashPathEffect(dash, 0) : null;
+        if ((m.flags & Mk.PENCIL) != 0 && m.k == Mk.PEN) {   // pencil: slightly rough edge
+            android.graphics.PathEffect grain = new android.graphics.DiscretePathEffect((float) Math.max(m.w * 1.6, 0.4), (float) (m.w * 0.14));
+            fx = fx == null ? grain : new android.graphics.ComposePathEffect(fx, grain);
+        }
+        stroke.setPathEffect(fx);
+        if (hlDraw && (m.flags & Mk.STRAIGHT) != 0) stroke.setStrokeCap(Paint.Cap.BUTT);
+        if (p.length > 2) {
+            float[] ws = runW.get(m);
+            for (int r = 2; r < p.length; r++) {
+                stroke.setStrokeWidth((float) (m.w * (ws != null && r - 2 < ws.length ? ws[r - 2] : 1)));
+                c.drawPath(p[r], stroke);
+            }
+        } else c.drawPath(p[0], stroke);
+        stroke.setPathEffect(null);
+        stroke.setStrokeCap(Paint.Cap.ROUND);
+        stroke.setStrokeWidth((float) m.w);
         if (!p[1].isEmpty()) {
-            fillP.setColor(col);
+            fillP.setColor((col & 0x00FFFFFF) | (a << 24));
             c.drawPath(p[1], fillP);
             c.drawPath(p[1], stroke);
         }

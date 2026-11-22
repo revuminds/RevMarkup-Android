@@ -123,26 +123,46 @@ final class PdfDoc {
         StringBuilder ap = new StringBuilder();
         String rgb = rgb(color);
         ap.append(rgb).append(" RG ").append(rgb).append(" rg ").append(f(m.w)).append(" w 1 J 1 j\n");
+        float[] dash = m.dash();
+        if (dash != null) ap.append('[').append(f(dash[0])).append(' ').append(f(dash[1])).append("] 0 d\n");
         List<float[]> inks = new ArrayList<>();
         RectF b = new RectF(Float.MAX_VALUE, Float.MAX_VALUE, -Float.MAX_VALUE, -Float.MAX_VALUE);
-        for (Mk.Sub s : m.build()) {
-            float[] q = new float[s.pts.length];
-            for (int i = 0; i < s.pts.length; i += 2) {
-                q[i] = (float) (mp[0] * s.pts[i] + mp[2] * s.pts[i + 1] + mp[4]);
-                q[i + 1] = (float) (mp[1] * s.pts[i] + mp[3] * s.pts[i + 1] + mp[5]);
-                b.union(q[i], q[i + 1]);
-                ap.append(f(q[i])).append(' ').append(f(q[i + 1])).append(i == 0 ? " m " : " l ");
+        if (m.variable()) {
+            // pressure line: pieces of equal width (the Ink list keeps the whole stroke for other viewers)
+            inks.add(toPage(mp, m.p, b));
+            for (float[] run : m.widthRuns()) {
+                float[] pts = java.util.Arrays.copyOfRange(run, 1, run.length);
+                float[] q = toPage(mp, pts, b);
+                ap.append(f(m.w * run[0])).append(" w ");
+                for (int i = 0; i < q.length; i += 2) ap.append(f(q[i])).append(' ').append(f(q[i + 1])).append(i == 0 ? " m " : " l ");
+                ap.append("S\n");
             }
+        } else for (Mk.Sub s : m.build()) {
+            float[] q = toPage(mp, s.pts, b);
+            if (s.fill && dash != null) ap.append("[] 0 d\n");   // arrow heads stay solid
+            for (int i = 0; i < q.length; i += 2) ap.append(f(q[i])).append(' ').append(f(q[i + 1])).append(i == 0 ? " m " : " l ");
             if (s.closed) ap.append("h ");
             ap.append(s.fill ? "b\n" : (s.closed ? "s\n" : "S\n"));
             inks.add(q);
         }
         boolean ink = m.k != Mk.BOX && m.k != Mk.ELLIPSE;
-        float pad = (float) (ink ? m.w * 2 + 1 : m.w / 2 + 0.5);
+        double wMax = m.w;
+        if (m.variable()) for (float v : m.pw) wMax = Math.max(wMax, m.w * v);
+        float pad = (float) (ink ? wMax * 2 + 1 : wMax / 2 + 0.5);
         float[] rect = {b.left - pad, b.top - pad, b.right + pad, b.bottom + pad};   // l, b, r, t (page space, y up)
         int subtype = m.k == Mk.BOX ? Pdfium.ANNOT_SQUARE : m.k == Mk.ELLIPSE ? Pdfium.ANNOT_CIRCLE : Pdfium.ANNOT_INK;
-        if (m.k == Mk.HIGHLIGHT) color = (color & 0x00FFFFFF) | (100 << 24);
+        color = (color & 0x00FFFFFF) | (m.alpha() << 24);   // opacity -> /CA (PDFium adds it to the appearance)
         Pdfium.nAddShape(h, pg, subtype, rect, color, 0, (float) m.w, ink ? inks.toArray(new float[0][]) : null, ap.toString(), kv);
+    }
+
+    private static float[] toPage(double[] mp, float[] pts, RectF b) {
+        float[] q = new float[pts.length];
+        for (int i = 0; i + 1 < pts.length; i += 2) {
+            q[i] = (float) (mp[0] * pts[i] + mp[2] * pts[i + 1] + mp[4]);
+            q[i + 1] = (float) (mp[1] * pts[i] + mp[3] * pts[i + 1] + mp[5]);
+            b.union(q[i], q[i + 1]);
+        }
+        return q;
     }
 
     private void writeText(int pg, double[] mp, Mk m, String[] kv, int color) {
