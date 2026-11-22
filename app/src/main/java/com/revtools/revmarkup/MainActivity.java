@@ -1582,6 +1582,7 @@ public final class MainActivity extends Activity implements PageView.Listener {
         final ContentResolver cr = getContentResolver();
         final File tmp = new File(work.getParentFile(), "saving.pdf");
         chipT.setText("Saving…");
+        Diag.log("save → " + HomeView.provider(target.getAuthority()) + (target.equals(srcUri) ? " (same file)" : " (copy)"));
         worker.job(() -> {
             d.save(snap, author, tmp);
             if (keep != null) keepOriginal(orig, keep);
@@ -1596,10 +1597,11 @@ public final class MainActivity extends Activity implements PageView.Listener {
             tmp.delete();
         }, err -> {
             if (err != null) {
+                Diag.log("save failed: " + err);
                 refreshBar();
                 if (!chosen) {   // the earlier location can no longer be written: ask for a place
                     outUri = null;
-                    toast("This file can't be changed (view only?) - choose where to save a copy.");
+                    toast("Can't write into this file (" + err.getMessage() + ") - choose where to save a copy.");
                     save(true, pendingAfterSave);
                 } else {
                     pendingAfterSave = null;
@@ -1743,6 +1745,8 @@ public final class MainActivity extends Activity implements PageView.Listener {
                 srcName = head[1];
                 srcUri = head[2] == null || head[2].isEmpty() ? null : Uri.parse(head[2]);
                 outUri = head[3] == null || head[3].isEmpty() ? null : Uri.parse(head[3]);
+                if (srcUri != null && (outUri == null || outUri.toString().endsWith("_comments.pdf") && !srcName.toLowerCase(Locale.ROOT).endsWith("_comments.pdf")))
+                    outUri = srcUri;   // drafts from before v2.0.9: save into the opened file too
                 treeUri = head[6] == null || head[6].isEmpty() ? null : Uri.parse(head[6]);
                 folderId = head[7] == null || head[7].isEmpty() ? null : head[7];
                 where = head[8] != null ? head[8] : srcUri != null ? HomeView.provider(srcUri.getAuthority()) : "";
